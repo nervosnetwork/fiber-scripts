@@ -17,7 +17,8 @@ use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, core::ScriptHashType, prelude::*},
     error::SysError,
-    high_level::{exec_cell, load_script, load_tx_hash, load_witness},
+    high_level::{exec_cell, load_input_since, load_script, load_tx_hash, load_witness},
+    since::Since,
 };
 use hex::encode;
 
@@ -30,6 +31,9 @@ pub enum Error {
     LengthNotEnough,
     Encoding,
     // Add customized errors here...
+    MultipleInputs,
+    InvalidSince,
+    ArgsError,
     AuthError,
 }
 
@@ -53,16 +57,38 @@ pub fn program_entry() -> i8 {
 }
 
 fn auth() -> Result<(), Error> {
+    // since local_delayed_pubkey and revocation_pubkey are derived, the scripts are usually unique,
+    // to simplify the implementation of the following unlocking logic, we check the number of inputs should be 1
+    if load_input_since(1, Source::GroupInput).is_ok() {
+        return Err(Error::MultipleInputs);
+    }
+
     let signature = load_witness(0, Source::GroupInput)?;
     let message = load_tx_hash()?;
 
-    let mut pubkey_hash = [0u8; 20];
     let script = load_script()?;
     let args: Bytes = script.args().unpack();
-    pubkey_hash.copy_from_slice(&args[0..20]);
+    // args = to_self_delay || blake160(local_delayed_pubkey) || blake160(revocation_pubkey)
+    if args.len() != 48 {
+        return Err(Error::ArgsError);
+    }
 
-    // AuthAlgorithmIdSchnorr = 7
-    let algorithm_id_str = CString::new(format!("{:02X?}", 7u8)).unwrap();
+    let mut pubkey_hash = [0u8; 20];
+    let raw_since_value = load_input_since(0, Source::GroupInput)?;
+    if raw_since_value == 0 {
+        pubkey_hash.copy_from_slice(&args[28..]);
+    } else {
+        let since = Since::new(raw_since_value);
+        let to_self_delay = Since::new(u64::from_le_bytes(args[0..8].try_into().unwrap()));
+        if since >= to_self_delay {
+            pubkey_hash.copy_from_slice(&args[8..28]);
+        } else {
+            return Err(Error::InvalidSince);
+        }
+    }
+
+    // AuthAlgorithmIdCkb = 0
+    let algorithm_id_str = CString::new(format!("{:02X?}", 0u8)).unwrap();
     let signature_str = CString::new(encode(signature)).unwrap();
     let message_str = CString::new(encode(message)).unwrap();
     let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();

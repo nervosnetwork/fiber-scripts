@@ -654,6 +654,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commitment-lock"
+version = "0.1.0"
+dependencies = [
+ "ckb-gen-types 0.114.0",
+ "ckb-std",
+ "hex",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1447,6 +1456,7 @@ dependencies = [
 name = "tests"
 version = "0.1.0"
 dependencies = [
+ "ckb-std",
  "ckb-testtool",
  "musig2",
  "secp256k1 0.28.2",
