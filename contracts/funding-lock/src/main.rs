@@ -17,7 +17,7 @@ use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, core::ScriptHashType, prelude::*},
     error::SysError,
-    high_level::{exec_cell, load_script, load_tx_hash, load_witness},
+    high_level::{exec_cell, load_input_since, load_script, load_tx_hash, load_witness},
 };
 use hex::encode;
 
@@ -30,6 +30,7 @@ pub enum Error {
     LengthNotEnough,
     Encoding,
     // Add customized errors here...
+    MultipleInputs,
     AuthError,
 }
 
@@ -53,6 +54,10 @@ pub fn program_entry() -> i8 {
 }
 
 fn auth() -> Result<(), Error> {
+    // funding lock will be unlocked by the commitment transaction, it should only have one input
+    if load_input_since(1, Source::GroupInput).is_ok() {
+        return Err(Error::MultipleInputs);
+    }
     let signature = load_witness(0, Source::GroupInput)?;
     let message = load_tx_hash()?;
 
