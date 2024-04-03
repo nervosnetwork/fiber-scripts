@@ -158,9 +158,9 @@ fn test_commitment_lock() {
     // deploy contract
     let mut context = Context::default();
     let loader = Loader::default();
-    let funding_lock_bin = loader.load_binary("commitment-lock");
+    let commitment_lock_bin = loader.load_binary("commitment-lock");
     let auth_bin = loader.load_binary("../../deps/auth");
-    let commitment_lock_out_point = context.deploy_cell(funding_lock_bin);
+    let commitment_lock_out_point = context.deploy_cell(commitment_lock_bin);
     let auth_out_point = context.deploy_cell(auth_bin);
 
     // prepare script
@@ -257,6 +257,312 @@ fn test_commitment_lock() {
     let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
 
     let witness = to_local_delay_key
+        .0
+        .sign_recoverable(&message.into())
+        .unwrap()
+        .serialize();
+
+    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    println!("tx: {:?}", tx);
+
+    // run
+    let cycles = context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("pass verification");
+    println!("consume cycles: {}", cycles);
+}
+
+#[test]
+fn test_htlc_lock_offered() {
+    // deploy contract
+    let mut context = Context::default();
+    let loader = Loader::default();
+    let htlc_lock_bin = loader.load_binary("htlc-lock");
+    let auth_bin = loader.load_binary("../../deps/auth");
+    let htlc_lock_out_point = context.deploy_cell(htlc_lock_bin);
+    let auth_out_point = context.deploy_cell(auth_bin);
+
+    // prepare script
+    let mut generator = Generator::new();
+    // 42 hours = 4.5 epochs
+    let delay = Since::from_epoch(EpochNumberWithFraction::new(10, 1, 2), false);
+    let revocation_key = generator.gen_keypair();
+    let remote_key = generator.gen_keypair();
+    let local_key = generator.gen_keypair();
+    let preimage = [42u8; 32];
+
+    let args = [
+        delay.as_u64().to_le_bytes().to_vec(),
+        blake2b_256(revocation_key.1.serialize())[0..20].to_vec(),
+        blake2b_256(remote_key.1.serialize())[0..20].to_vec(),
+        blake2b_256(local_key.1.serialize())[0..20].to_vec(),
+        blake2b_256(preimage)[0..20].to_vec(),
+    ]
+    .concat();
+
+    let lock_script = context
+        .build_script(&htlc_lock_out_point, args.into())
+        .expect("script");
+
+    // prepare cell deps
+    let commitment_lock_dep = CellDep::new_builder()
+        .out_point(htlc_lock_out_point)
+        .build();
+    let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
+    let cell_deps = vec![commitment_lock_dep, auth_dep].pack();
+
+    // prepare cells
+    let input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(1000u64.pack())
+            .lock(lock_script.clone())
+            .build(),
+        Bytes::new(),
+    );
+
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(500u64.pack())
+            .lock(lock_script.clone())
+            .build(),
+        CellOutput::new_builder()
+            .capacity(500u64.pack())
+            .lock(lock_script)
+            .build(),
+    ];
+
+    let outputs_data = vec![Bytes::new(); 2];
+
+    // build transaction after delay to local unlock logic
+    // delay 48 hours
+    let to_local_delay = Since::from_epoch(EpochNumberWithFraction::new(12, 0, 1), false);
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point.clone())
+        .since(to_local_delay.as_u64().pack())
+        .build();
+
+    let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .input(input)
+        .outputs(outputs.clone())
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // sign with local key
+    let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+    let witness = local_key
+        .0
+        .sign_recoverable(&message.into())
+        .unwrap()
+        .serialize();
+
+    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    println!("tx: {:?}", tx);
+
+    // run
+    let cycles = context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("pass verification");
+    println!("consume cycles: {}", cycles);
+
+    // build transaction with revocation unlock logic
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point)
+        .build();
+
+    let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .input(input.clone())
+        .outputs(outputs.clone())
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // sign with revocation key
+    let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+    let witness = revocation_key
+        .0
+        .sign_recoverable(&message.into())
+        .unwrap()
+        .serialize();
+
+    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    println!("tx: {:?}", tx);
+
+    // run
+    let cycles = context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("pass verification");
+    println!("consume cycles: {}", cycles);
+
+    // build transaction with preimage unlock logic
+    let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .input(input.clone())
+        .outputs(outputs.clone())
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // sign with preimage and remote key
+    let signature = remote_key
+        .0
+        .sign_recoverable(&message.into())
+        .unwrap()
+        .serialize();
+    let witness = [signature, preimage.to_vec()].concat();
+    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    println!("tx: {:?}", tx);
+
+    // run
+    let cycles = context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("pass verification");
+    println!("consume cycles: {}", cycles);
+}
+
+#[test]
+fn test_htlc_lock_received() {
+    // deploy contract
+    let mut context = Context::default();
+    let loader = Loader::default();
+    let htlc_lock_bin = loader.load_binary("htlc-lock");
+    let auth_bin = loader.load_binary("../../deps/auth");
+    let htlc_lock_out_point = context.deploy_cell(htlc_lock_bin);
+    let auth_out_point = context.deploy_cell(auth_bin);
+
+    // prepare script
+    let mut generator = Generator::new();
+    // 42 hours = 4.5 epochs
+    let delay = Since::from_epoch(EpochNumberWithFraction::new(10, 1, 2), false);
+    let revocation_key = generator.gen_keypair();
+    let remote_key = generator.gen_keypair();
+    let local_key = generator.gen_keypair();
+    let preimage = [42u8; 32];
+    // timeout after 2024-04-01 01:00:00
+    let expiry = Since::from_timestamp(1711976400, true).unwrap();
+
+    let args = [
+        delay.as_u64().to_le_bytes().to_vec(),
+        blake2b_256(revocation_key.1.serialize())[0..20].to_vec(),
+        blake2b_256(remote_key.1.serialize())[0..20].to_vec(),
+        blake2b_256(local_key.1.serialize())[0..20].to_vec(),
+        blake2b_256(preimage)[0..20].to_vec(),
+        expiry.as_u64().to_le_bytes().to_vec(),
+    ]
+    .concat();
+
+    let lock_script = context
+        .build_script(&htlc_lock_out_point, args.into())
+        .expect("script");
+
+    // prepare cell deps
+    let commitment_lock_dep = CellDep::new_builder()
+        .out_point(htlc_lock_out_point)
+        .build();
+    let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
+    let cell_deps = vec![commitment_lock_dep, auth_dep].pack();
+
+    // prepare cells
+    let input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(1000u64.pack())
+            .lock(lock_script.clone())
+            .build(),
+        Bytes::new(),
+    );
+
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(500u64.pack())
+            .lock(lock_script.clone())
+            .build(),
+        CellOutput::new_builder()
+            .capacity(500u64.pack())
+            .lock(lock_script)
+            .build(),
+    ];
+
+    let outputs_data = vec![Bytes::new(); 2];
+
+    // build transaction after delay with preimage to local unlock logic
+    // delay 48 hours
+    let to_local_delay = Since::from_epoch(EpochNumberWithFraction::new(12, 0, 1), false);
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point.clone())
+        .since(to_local_delay.as_u64().pack())
+        .build();
+
+    let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .input(input)
+        .outputs(outputs.clone())
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // sign with preimage and local key
+    let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+    let signature = local_key
+        .0
+        .sign_recoverable(&message.into())
+        .unwrap()
+        .serialize();
+    let witness = [signature, preimage.to_vec()].concat();
+
+    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    println!("tx: {:?}", tx);
+
+    // run
+    let cycles = context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("pass verification");
+    println!("consume cycles: {}", cycles);
+
+    // build transaction with revocation unlock logic
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point.clone())
+        .build();
+
+    let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .input(input)
+        .outputs(outputs.clone())
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // sign with revocation key
+    let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+    let witness = revocation_key
+        .0
+        .sign_recoverable(&message.into())
+        .unwrap()
+        .serialize();
+
+    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    println!("tx: {:?}", tx);
+
+    // run
+    let cycles = context
+        .verify_tx(&tx, MAX_CYCLES)
+        .expect("pass verification");
+    println!("consume cycles: {}", cycles);
+
+    // build transaction with timeout unlock logic
+    let timeout = Since::from_timestamp(1711976400 + 1000, true).unwrap();
+
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point.clone())
+        .since(timeout.as_u64().pack())
+        .build();
+
+    let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .input(input)
+        .outputs(outputs.clone())
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // sign with remote key
+    let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+    let witness = remote_key
         .0
         .sign_recoverable(&message.into())
         .unwrap()
