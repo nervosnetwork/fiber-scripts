@@ -34,10 +34,11 @@ pub enum Error {
     // Add customized errors here...
     MultipleInputs,
     InvalidSince,
-    InvalidWitnessLength,
-    ArgsError,
-    AuthError,
+    ArgsLenError,
+    WitnessLenError,
+    WitnessHashError,
     PreimageMismatch,
+    AuthError,
 }
 
 impl From<SysError> for Error {
@@ -71,54 +72,70 @@ fn auth() -> Result<(), Error> {
         return Err(Error::MultipleInputs);
     }
 
-    let witness = load_witness(0, Source::GroupInput)?;
-    let message = load_tx_hash()?;
-
     let script = load_script()?;
     let args: Bytes = script.args().unpack();
-    let htlc_type = match args.len() {
-        88 => HtlcType::Offered,
-        96 => HtlcType::Received,
-        _ => return Err(Error::ArgsError),
+    if args.len() != 20 {
+        return Err(Error::ArgsLenError);
+    }
+
+    let witness = load_witness(0, Source::GroupInput)?;
+    let htlc_type = match witness.len() {
+        153 | 185 => HtlcType::Offered,
+        161 | 193 => HtlcType::Received,
+        _ => return Err(Error::WitnessLenError),
     };
-    let delay = Since::new(u64::from_le_bytes(args[0..8].try_into().unwrap()));
+    let mut signature = [0u8; 65];
+    match htlc_type {
+        HtlcType::Offered => {
+            if blake2b_256(&witness[0..88])[0..20] != args[0..20] {
+                return Err(Error::WitnessHashError);
+            }
+            signature.copy_from_slice(&witness[88..153]);
+        }
+        HtlcType::Received => {
+            if blake2b_256(&witness[0..96])[0..20] != args[0..20] {
+                return Err(Error::WitnessHashError);
+            }
+            signature.copy_from_slice(&witness[96..161]);
+        }
+    }
+
+    let message = load_tx_hash()?;
+
+    let delay = Since::new(u64::from_le_bytes(witness[0..8].try_into().unwrap()));
     let mut revocation_pubkey_hash = [0u8; 20];
     let mut remote_htlc_pubkey_hash = [0u8; 20];
     let mut local_htlc_pubkey_hash = [0u8; 20];
     let mut payment_hash = [0u8; 20];
 
-    revocation_pubkey_hash.copy_from_slice(&args[8..28]);
-    remote_htlc_pubkey_hash.copy_from_slice(&args[28..48]);
-    local_htlc_pubkey_hash.copy_from_slice(&args[48..68]);
-    payment_hash.copy_from_slice(&args[68..88]);
+    revocation_pubkey_hash.copy_from_slice(&witness[8..28]);
+    remote_htlc_pubkey_hash.copy_from_slice(&witness[28..48]);
+    local_htlc_pubkey_hash.copy_from_slice(&witness[48..68]);
+    payment_hash.copy_from_slice(&witness[68..88]);
 
     let raw_since_value = load_input_since(0, Source::GroupInput)?;
     let pubkey_hash = match htlc_type {
         HtlcType::Offered => {
-            if witness.len() == 65 + 32 {
-                let preimage = &witness[65..];
+            if witness.len() == 185 {
+                let preimage = &witness[153..];
                 if blake2b_256(preimage)[0..20] != payment_hash {
                     return Err(Error::PreimageMismatch);
                 }
                 remote_htlc_pubkey_hash
-            } else if witness.len() == 65 {
-                if raw_since_value == 0 {
-                    revocation_pubkey_hash
-                } else {
-                    let since = Since::new(raw_since_value);
-                    if since >= delay {
-                        local_htlc_pubkey_hash
-                    } else {
-                        return Err(Error::InvalidSince);
-                    }
-                }
+            } else if raw_since_value == 0 {
+                revocation_pubkey_hash
             } else {
-                return Err(Error::InvalidWitnessLength);
+                let since = Since::new(raw_since_value);
+                if since >= delay {
+                    local_htlc_pubkey_hash
+                } else {
+                    return Err(Error::InvalidSince);
+                }
             }
         }
         HtlcType::Received => {
-            if witness.len() == 65 + 32 {
-                let preimage = &witness[65..];
+            if witness.len() == 193 {
+                let preimage = &witness[161..];
                 if blake2b_256(preimage)[0..20] != payment_hash {
                     return Err(Error::PreimageMismatch);
                 }
@@ -132,25 +149,19 @@ fn auth() -> Result<(), Error> {
                         return Err(Error::InvalidSince);
                     }
                 }
-            } else if witness.len() == 65 {
-                if raw_since_value == 0 {
-                    revocation_pubkey_hash
-                } else {
-                    let since = Since::new(raw_since_value);
-                    let timeout = Since::new(u64::from_le_bytes(args[88..96].try_into().unwrap()));
-                    if since >= timeout {
-                        remote_htlc_pubkey_hash
-                    } else {
-                        return Err(Error::InvalidSince);
-                    }
-                }
+            } else if raw_since_value == 0 {
+                revocation_pubkey_hash
             } else {
-                return Err(Error::InvalidWitnessLength);
+                let since = Since::new(raw_since_value);
+                let timeout = Since::new(u64::from_le_bytes(witness[88..96].try_into().unwrap()));
+                if since >= timeout {
+                    remote_htlc_pubkey_hash
+                } else {
+                    return Err(Error::InvalidSince);
+                }
             }
         }
     };
-
-    let signature = &witness[0..65];
 
     // AuthAlgorithmIdCkb = 0
     let algorithm_id_str = CString::new(format!("{:02X?}", 0u8)).unwrap();

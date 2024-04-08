@@ -2,18 +2,18 @@
 
 This is a simple HTLC lock script for ckb payment channel network.
 
-The lock script args is concatenated by the following fields:
+The lock script args is the hash result of blake160(delay || revocation_pubkey_hash || remote_htlc_pubkey_hash || local_htlc_pubkey_hash || payment_hash || expiry), the witness is concatenated by the following fields:
 
 - `delay`: 8 bytes, the delay value of the HTLC, should be a relative timestamp, block number or epoch number
-- `blake160(revocation_pubkey)`: 20 bytes
-- `blake160(remote_htlc_pubkey)`: 20 bytes
-- `blake160(local_htlc_pubkey)`: 20 bytes
+- `revocation_pubkey_hash`: 20 bytes, the hash of blake160(revocation_pubkey)
+- `remote_htlc_pubkey_hash`: 20 bytes, the hash of blake160(remote_htlc_pubkey)
+- `local_htlc_pubkey_hash`: 20 bytes, the hash of blake160(local_htlc_pubkey)
 - `payment_hash`: 20 bytes
 - `expiry`: 8 bytes, an optional field to specify the expiry value of the HTLC, should be an absolute timestamp, block number or epoch number. If this field is present, the HTLC type is received, otherwise, the HTLC type is offered.
+- `signature`: 65 bytes
+- `preimage`: 32 bytes, an optional field to provide the preimage of the payment_hash
 
-The witness is 65 bytes signature and an optional 32 bytes preimage of the payment hash, to know more about the transaction building process, please refer to the `test_htlc_lock_received` and `test_htlc_lock_offered` unit test.
-
-TODO: Change to P2WSH style, change the lock script args to the hash of the witness script.
+To know more about the transaction building process, please refer to the `test_htlc_lock_received` and `test_htlc_lock_offered` unit test.
 
 *This contract was bootstrapped with [ckb-script-templates].*
 

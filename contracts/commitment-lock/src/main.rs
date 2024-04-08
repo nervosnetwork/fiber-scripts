@@ -4,6 +4,7 @@
 #[cfg(test)]
 extern crate alloc;
 
+use ckb_hash::blake2b_256;
 #[cfg(not(test))]
 use ckb_std::default_alloc;
 #[cfg(not(test))]
@@ -33,7 +34,9 @@ pub enum Error {
     // Add customized errors here...
     MultipleInputs,
     InvalidSince,
-    ArgsError,
+    ArgsLenError,
+    WitnessLenError,
+    WitnessHashError,
     AuthError,
 }
 
@@ -63,25 +66,29 @@ fn auth() -> Result<(), Error> {
         return Err(Error::MultipleInputs);
     }
 
-    let signature = load_witness(0, Source::GroupInput)?;
-    let message = load_tx_hash()?;
-
     let script = load_script()?;
     let args: Bytes = script.args().unpack();
-    // args = to_self_delay || blake160(local_delayed_pubkey) || blake160(revocation_pubkey)
-    if args.len() != 48 {
-        return Err(Error::ArgsError);
+    if args.len() != 20 {
+        return Err(Error::ArgsLenError);
+    }
+    let witness = load_witness(0, Source::GroupInput)?;
+    if witness.len() != 8 + 20 + 20 + 65 {
+        return Err(Error::WitnessLenError);
+    }
+    if blake2b_256(&witness[0..48])[0..20] != args[0..20] {
+        return Err(Error::WitnessHashError);
     }
 
+    let message = load_tx_hash()?;
     let mut pubkey_hash = [0u8; 20];
     let raw_since_value = load_input_since(0, Source::GroupInput)?;
     if raw_since_value == 0 {
-        pubkey_hash.copy_from_slice(&args[28..]);
+        pubkey_hash.copy_from_slice(&witness[28..48]);
     } else {
         let since = Since::new(raw_since_value);
-        let to_self_delay = Since::new(u64::from_le_bytes(args[0..8].try_into().unwrap()));
+        let to_self_delay = Since::new(u64::from_le_bytes(witness[0..8].try_into().unwrap()));
         if since >= to_self_delay {
-            pubkey_hash.copy_from_slice(&args[8..28]);
+            pubkey_hash.copy_from_slice(&witness[8..28]);
         } else {
             return Err(Error::InvalidSince);
         }
@@ -89,7 +96,7 @@ fn auth() -> Result<(), Error> {
 
     // AuthAlgorithmIdCkb = 0
     let algorithm_id_str = CString::new(format!("{:02X?}", 0u8)).unwrap();
-    let signature_str = CString::new(encode(signature)).unwrap();
+    let signature_str = CString::new(encode(&witness[48..])).unwrap();
     let message_str = CString::new(encode(message)).unwrap();
     let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();
 

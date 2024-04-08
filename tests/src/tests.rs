@@ -170,12 +170,14 @@ fn test_commitment_lock() {
     let to_local_delay_key = generator.gen_keypair();
     let revocation_key = generator.gen_keypair();
 
-    let args = [
+    let witness_prefix = [
         to_local_delay.as_u64().to_le_bytes().to_vec(),
         blake2b_256(to_local_delay_key.1.serialize())[0..20].to_vec(),
         blake2b_256(revocation_key.1.serialize())[0..20].to_vec(),
     ]
     .concat();
+
+    let args = blake2b_256(&witness_prefix)[0..20].to_vec();
 
     let lock_script = context
         .build_script(&commitment_lock_out_point, args.into())
@@ -223,11 +225,12 @@ fn test_commitment_lock() {
     // sign with revocation key
     let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
 
-    let witness = revocation_key
+    let signature = revocation_key
         .0
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
+    let witness = [witness_prefix.clone(), signature].concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -256,11 +259,12 @@ fn test_commitment_lock() {
     // sign with to_local_delay_key
     let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
 
-    let witness = to_local_delay_key
+    let signature = to_local_delay_key
         .0
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
+    let witness = [witness_prefix, signature].concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -291,7 +295,7 @@ fn test_htlc_lock_offered() {
     let local_key = generator.gen_keypair();
     let preimage = [42u8; 32];
 
-    let args = [
+    let witness_prefix = [
         delay.as_u64().to_le_bytes().to_vec(),
         blake2b_256(revocation_key.1.serialize())[0..20].to_vec(),
         blake2b_256(remote_key.1.serialize())[0..20].to_vec(),
@@ -299,6 +303,7 @@ fn test_htlc_lock_offered() {
         blake2b_256(preimage)[0..20].to_vec(),
     ]
     .concat();
+    let args = blake2b_256(&witness_prefix)[0..20].to_vec();
 
     let lock_script = context
         .build_script(&htlc_lock_out_point, args.into())
@@ -350,11 +355,12 @@ fn test_htlc_lock_offered() {
 
     // sign with local key
     let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
-    let witness = local_key
+    let signature = local_key
         .0
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
+    let witness = [witness_prefix.clone(), signature].concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -379,11 +385,12 @@ fn test_htlc_lock_offered() {
 
     // sign with revocation key
     let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
-    let witness = revocation_key
+    let signature = revocation_key
         .0
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
+    let witness = [witness_prefix.clone(), signature].concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -408,7 +415,7 @@ fn test_htlc_lock_offered() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [signature, preimage.to_vec()].concat();
+    let witness = [witness_prefix, signature, preimage.to_vec()].concat();
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
 
@@ -440,7 +447,7 @@ fn test_htlc_lock_received() {
     // timeout after 2024-04-01 01:00:00
     let expiry = Since::from_timestamp(1711976400, true).unwrap();
 
-    let args = [
+    let witness_prefix = [
         delay.as_u64().to_le_bytes().to_vec(),
         blake2b_256(revocation_key.1.serialize())[0..20].to_vec(),
         blake2b_256(remote_key.1.serialize())[0..20].to_vec(),
@@ -449,6 +456,7 @@ fn test_htlc_lock_received() {
         expiry.as_u64().to_le_bytes().to_vec(),
     ]
     .concat();
+    let args = blake2b_256(&witness_prefix)[0..20].to_vec();
 
     let lock_script = context
         .build_script(&htlc_lock_out_point, args.into())
@@ -505,7 +513,7 @@ fn test_htlc_lock_received() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [signature, preimage.to_vec()].concat();
+    let witness = [witness_prefix.clone(), signature, preimage.to_vec()].concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -530,11 +538,12 @@ fn test_htlc_lock_received() {
 
     // sign with revocation key
     let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
-    let witness = revocation_key
+    let signature = revocation_key
         .0
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
+    let witness = [witness_prefix.clone(), signature].concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -562,11 +571,12 @@ fn test_htlc_lock_received() {
 
     // sign with remote key
     let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
-    let witness = remote_key
+    let signature = remote_key
         .0
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
+    let witness = [witness_prefix, signature].concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
