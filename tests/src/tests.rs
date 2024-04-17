@@ -60,7 +60,7 @@ fn test_funding_lock() {
         Bytes::new(),
     );
     let input = CellInput::new_builder()
-        .previous_output(input_out_point)
+        .previous_output(input_out_point.clone())
         .build();
     let outputs = vec![
         CellOutput::new_builder()
@@ -84,7 +84,17 @@ fn test_funding_lock() {
         .build();
 
     // sign and add witness
-    let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+    let tx_hash: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+    let version = 0u64.to_le_bytes();
+    let funding_out_point = input_out_point.as_slice();
+    let message = blake2b_256(
+        [
+            version.to_vec(),
+            funding_out_point.to_vec(),
+            tx_hash.to_vec(),
+        ]
+        .concat(),
+    );
 
     let mut first_round_1 = {
         let mut nonce_seed = [0u8; 32];
@@ -123,8 +133,8 @@ fn test_funding_lock() {
         .receive_nonce(0, first_round_1.our_public_nonce())
         .unwrap();
 
-    let mut second_round_1 = first_round_1.finalize(sec_key_1, message).unwrap();
-    let mut second_round_2 = first_round_2.finalize(sec_key_2, message).unwrap();
+    let mut second_round_1 = first_round_1.finalize(sec_key_1, &message).unwrap();
+    let mut second_round_2 = first_round_2.finalize(sec_key_2, &message).unwrap();
     let signature_1: PartialSignature = second_round_1.our_signature();
     let signature_2: PartialSignature = second_round_2.our_signature();
 
@@ -137,8 +147,10 @@ fn test_funding_lock() {
     println!("signature: {:?}", aggregated_signature_1.to_bytes());
 
     let witness = [
-        &x_only_pub_key,
-        aggregated_signature_1.to_bytes().as_slice(),
+        version.to_vec(),
+        funding_out_point.to_vec(),
+        x_only_pub_key.to_vec(),
+        aggregated_signature_1.to_bytes().to_vec(),
     ]
     .concat();
 

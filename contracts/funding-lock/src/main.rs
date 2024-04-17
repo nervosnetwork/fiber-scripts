@@ -4,6 +4,7 @@
 #[cfg(test)]
 extern crate alloc;
 
+use ckb_hash::blake2b_256;
 #[cfg(not(test))]
 use ckb_std::default_alloc;
 #[cfg(not(test))]
@@ -31,6 +32,7 @@ pub enum Error {
     Encoding,
     // Add customized errors here...
     MultipleInputs,
+    WitnessLenError,
     AuthError,
 }
 
@@ -58,8 +60,16 @@ fn auth() -> Result<(), Error> {
     if load_input_since(1, Source::GroupInput).is_ok() {
         return Err(Error::MultipleInputs);
     }
-    let signature = load_witness(0, Source::GroupInput)?;
-    let message = load_tx_hash()?;
+    let witness = load_witness(0, Source::GroupInput)?;
+    if witness.len() != 8 + 36 + 32 + 64 {
+        return Err(Error::WitnessLenError);
+    }
+    let tx_hash = load_tx_hash()?;
+    let version = witness[0..8].to_vec();
+    let funding_out_point = witness[8..44].to_vec();
+    // Schnorr signature cannot recover the public key, so we need to provide the public key
+    let pubkey_and_signature = witness[44..].to_vec();
+    let message = blake2b_256([version, funding_out_point, tx_hash.to_vec()].concat());
 
     let mut pubkey_hash = [0u8; 20];
     let script = load_script()?;
@@ -68,7 +78,7 @@ fn auth() -> Result<(), Error> {
 
     // AuthAlgorithmIdSchnorr = 7
     let algorithm_id_str = CString::new(format!("{:02X?}", 7u8)).unwrap();
-    let signature_str = CString::new(encode(signature)).unwrap();
+    let signature_str = CString::new(encode(pubkey_and_signature)).unwrap();
     let message_str = CString::new(encode(message)).unwrap();
     let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();
 
