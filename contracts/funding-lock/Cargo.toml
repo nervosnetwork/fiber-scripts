@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 ckb-std = "0.15"
+ckb-hash = { version = "0.114.0", default-features = false, features = ["ckb-contract"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"]}
 
 [build-dependencies]

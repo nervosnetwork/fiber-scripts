@@ -769,6 +769,7 @@ name = "funding-lock"
 version = "0.1.0"
 dependencies = [
  "ckb-gen-types 0.114.0",
+ "ckb-hash 0.114.0",
  "ckb-std",
  "hex",
 ]
@@ -873,16 +874,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
-]
-
-[[package]]
-name = "htlc-lock"
-version = "0.1.0"
-dependencies = [
- "ckb-gen-types 0.114.0",
- "ckb-hash 0.114.0",
- "ckb-std",
- "hex",
 ]
 
 [[package]]
