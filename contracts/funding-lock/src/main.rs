@@ -13,12 +13,13 @@ ckb_std::entry!(program_entry);
 default_alloc!();
 
 use alloc::ffi::CString;
-use alloc::format;
 use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, core::ScriptHashType, prelude::*},
     error::SysError,
-    high_level::{exec_cell, load_input_since, load_script, load_tx_hash, load_witness},
+    high_level::{
+        exec_cell, load_input_out_point, load_input_since, load_script, load_tx_hash, load_witness,
+    },
 };
 use hex::encode;
 
@@ -33,6 +34,7 @@ pub enum Error {
     // Add customized errors here...
     MultipleInputs,
     WitnessLenError,
+    FundingOutPointError,
     AuthError,
 }
 
@@ -67,6 +69,10 @@ fn auth() -> Result<(), Error> {
     let tx_hash = load_tx_hash()?;
     let version = witness[0..8].to_vec();
     let funding_out_point = witness[8..44].to_vec();
+    let input_out_point = load_input_out_point(0, Source::GroupInput)?;
+    if input_out_point.as_slice() != funding_out_point.as_slice() {
+        return Err(Error::FundingOutPointError);
+    }
     // Schnorr signature cannot recover the public key, so we need to provide the public key
     let pubkey_and_signature = witness[44..].to_vec();
     let message = blake2b_256([version, funding_out_point, tx_hash.to_vec()].concat());
@@ -77,7 +83,7 @@ fn auth() -> Result<(), Error> {
     pubkey_hash.copy_from_slice(&args[0..20]);
 
     // AuthAlgorithmIdSchnorr = 7
-    let algorithm_id_str = CString::new(format!("{:02X?}", 7u8)).unwrap();
+    let algorithm_id_str = CString::new(encode([7u8])).unwrap();
     let signature_str = CString::new(encode(pubkey_and_signature)).unwrap();
     let message_str = CString::new(encode(message)).unwrap();
     let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();

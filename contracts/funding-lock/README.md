@@ -4,10 +4,10 @@ This is a simple funding lock script for ckb payment channel network. It utilize
 
 The lock script args is a blake160 hash of the aggregated public key of the two parties, to unlock this lock, the transaction must provide following fields in the witness:
 
-- version: 8 bytes, u64 in little-endian
-- funding_out_point: 36 bytes, out point of the funding transaction
-- pubkey: 32 bytes, x only aggregated public key
-- signature: 64 bytes, aggregated signature
+- `version`: 8 bytes, u64 in little-endian
+- `funding_out_point`: 36 bytes, out point of the funding transaction
+- `pubkey`: 32 bytes, x only aggregated public key
+- `signature`: 64 bytes, aggregated signature
 
 To know more about the transaction building process, please refer to the `test_funding_lock` unit test.
 
