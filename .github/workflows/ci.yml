@@ -16,6 +16,12 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+    - name: Install LLVM and Clang
+      uses: KyleMayes/install-llvm-action@v2
+      with:
+        version: "16"
+    - name: Prepare
+      run: make prepare
     - name: Build
       run: make build
     - name: Run tests
