@@ -18,7 +18,7 @@ The lock script args is the hash result of blake160(local_delay_epoch || local_d
 - `signature`: 65 bytes, the signature of the xxx_pubkey
 - `preimage`: 32 bytes, an optional field to provide the preimage of the payment_hash
 
-To know more about the transaction building process, please refer to the `test_commitment_lock` unit test.
+To know more about the transaction building process, please refer to the `test_commitment_lock_no_pending_htlcs` and `test_commitment_lock_with_two_pending_htlcs` unit test.
 
 *This contract was bootstrapped with [ckb-script-templates].*
 
