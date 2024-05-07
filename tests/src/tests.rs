@@ -318,8 +318,8 @@ fn test_commitment_lock_with_two_pending_htlcs() {
     let local_htlc_key2 = generator.gen_keypair();
     let preimage1 = [42u8; 32];
     let preimage2 = [24u8; 32];
-    let payment_amount1 = 5 * BYTE_SHANNONS;
-    let payment_amount2 = 8 * BYTE_SHANNONS;
+    let payment_amount1 = 5 * BYTE_SHANNONS as u128;
+    let payment_amount2 = 8 * BYTE_SHANNONS as u128;
     // timeout after 2024-04-01 01:00:00
     let expiry1 = Since::from_timestamp(1711976400, true).unwrap();
     // timeout after 2024-04-02 01:00:00
@@ -468,7 +468,7 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .args(blake2b_256(&new_witness_script)[0..20].to_vec().pack())
         .build();
     let outputs = vec![CellOutput::new_builder()
-        .capacity((1000 * BYTE_SHANNONS - payment_amount1).pack())
+        .capacity((1000 * BYTE_SHANNONS - payment_amount1 as u64).pack())
         .lock(new_lock_script.clone())
         .build()];
     let outputs_data = vec![Bytes::new()];
@@ -572,7 +572,7 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .args(blake2b_256(&new_witness_script)[0..20].to_vec().pack())
         .build();
     let outputs = vec![CellOutput::new_builder()
-        .capacity((1000 * BYTE_SHANNONS - payment_amount2).pack())
+        .capacity((1000 * BYTE_SHANNONS - payment_amount2 as u64).pack())
         .lock(new_lock_script.clone())
         .build()];
     let outputs_data = vec![Bytes::new()];
