@@ -18,8 +18,8 @@ use ckb_std::{
     ckb_types::{bytes::Bytes, core::ScriptHashType, prelude::*},
     error::SysError,
     high_level::{
-        exec_cell, load_cell_capacity, load_cell_lock, load_input_since, load_script, load_tx_hash,
-        load_witness,
+        exec_cell, load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type,
+        load_input_since, load_script, load_tx_hash, load_witness,
     },
     since::Since,
 };
@@ -43,6 +43,8 @@ pub enum Error {
     WitnessHashError,
     OutputCapacityError,
     OutputLockError,
+    OutputTypeError,
+    OutputUdtAmountError,
     PreimageError,
     AuthError,
 }
@@ -110,6 +112,9 @@ fn auth() -> Result<(), Error> {
         return Err(Error::MultipleInputs);
     }
 
+    // no need to check the type script is sudt / xudt or not, because the offchain tx collaboration will ensure the correct type script.
+    let type_script = load_cell_type(0, Source::GroupInput)?;
+
     let script = load_script()?;
     let args: Bytes = script.args().unpack();
     if args.len() != 20 {
@@ -172,7 +177,12 @@ fn auth() -> Result<(), Error> {
             return Err(Error::InvalidUnlockType);
         }
 
-        let mut new_capacity = load_cell_capacity(0, Source::GroupInput)? as u128;
+        let mut new_amount = if type_script.is_some() {
+            let input_cell_data = load_cell_data(0, Source::GroupInput)?;
+            u128::from_le_bytes(input_cell_data[0..16].try_into().unwrap())
+        } else {
+            load_cell_capacity(0, Source::GroupInput)? as u128
+        };
         let mut new_witness_script: Vec<&[u8]> = Vec::new();
         new_witness_script.push(&witness[0..MIN_WITNESS_SCRIPT_LEN]);
 
@@ -193,13 +203,12 @@ fn auth() -> Result<(), Error> {
                         {
                             return Err(Error::PreimageError);
                         }
-                        new_capacity -= htlc.payment_amount();
+                        new_amount -= htlc.payment_amount();
                         pubkey_hash.copy_from_slice(htlc.remote_htlc_pubkey_hash());
                     } else {
                         // when input since is not 0, it means the unlock logic is for local_htlc pubkey and htlc expiry
                         let since = Since::new(raw_since_value);
-                        let htlc_expiry =
-                            Since::new(htlc.htlc_expiry());
+                        let htlc_expiry = Since::new(htlc.htlc_expiry());
                         if since >= htlc_expiry {
                             pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
                         } else {
@@ -221,10 +230,9 @@ fn auth() -> Result<(), Error> {
                     } else {
                         // when input since is not 0, it means the unlock logic is for remote_htlc pubkey and htlc expiry
                         let since = Since::new(raw_since_value);
-                        let htlc_expiry =
-                            Since::new(htlc.htlc_expiry());
+                        let htlc_expiry = Since::new(htlc.htlc_expiry());
                         if since >= htlc_expiry {
-                            new_capacity -= htlc.payment_amount();
+                            new_amount -= htlc.payment_amount();
                             pubkey_hash.copy_from_slice(htlc.remote_htlc_pubkey_hash());
                         } else {
                             return Err(Error::InvalidSince);
@@ -237,12 +245,8 @@ fn auth() -> Result<(), Error> {
                 new_witness_script.push(htlc_script);
             }
         }
-        // verify the first output cell's capacity and lock is correct
-        let output_capacity = load_cell_capacity(0, Source::Output)? as u128;
-        if output_capacity != new_capacity {
-            return Err(Error::OutputCapacityError);
-        }
 
+        // verify the first output cell's lock script is correct
         let output_lock = load_cell_lock(0, Source::Output)?;
         let expected_lock_args = blake2b_256(new_witness_script.concat())[0..20].pack();
         if output_lock.code_hash() != script.code_hash()
@@ -250,6 +254,35 @@ fn auth() -> Result<(), Error> {
             || output_lock.args() != expected_lock_args
         {
             return Err(Error::OutputLockError);
+        }
+
+        match type_script {
+            Some(udt_script) => {
+                // verify the first output cell's capacity, type script and udt amount are correct
+                let output_capacity = load_cell_capacity(0, Source::Output)?;
+                let input_capacity = load_cell_capacity(0, Source::GroupInput)?;
+                if output_capacity != input_capacity {
+                    return Err(Error::OutputCapacityError);
+                }
+
+                let output_type = load_cell_type(0, Source::Output)?;
+                if output_type != Some(udt_script) {
+                    return Err(Error::OutputTypeError);
+                }
+
+                let output_data = load_cell_data(0, Source::Output)?;
+                let output_amount = u128::from_le_bytes(output_data[0..16].try_into().unwrap());
+                if output_amount != new_amount {
+                    return Err(Error::OutputUdtAmountError);
+                }
+            }
+            None => {
+                // verify the first output cell's capacity is correct
+                let output_capacity = load_cell_capacity(0, Source::Output)? as u128;
+                if output_capacity != new_amount {
+                    return Err(Error::OutputCapacityError);
+                }
+            }
         }
     }
 
