@@ -7,9 +7,9 @@ The lock script args is the hash result of blake160(local_delay_epoch || local_d
 - `local_delay_epoch`: 8 bytes, u64 in little endian, must be a relative EpochNumberWithFraction
 - `local_delay_pubkey_hash`: 20 bytes, hash result of blake160(local_delay_pubkey)
 - `revocation_pubkey_hash`: 20 bytes, hash result of blake160(revocation_pubkey)
-- `pending_htlc`: A group of pending HTLCS, each HTLC is 77 bytes, contains:
+- `pending_htlc`: A group of pending HTLCS, each HTLC is 85 bytes, contains:
     - `htlc_type`: 1 byte, 0x00 for offered HTLC, 0x01 for received HTLC
-    - `payment_amount`: 8 bytes, u64 in little endian
+    - `payment_amount`: 16 bytes, u128 in little endian
     - `payment_hash`: 20 bytes
     - `remote_htlc_pubkey_hash`: 20 bytes, hash result of blake160(remote_htlc_pubkey)
     - `local_htlc_pubkey_hash`: 20 bytes, hash result of blake160(local_htlc_pubkey)
