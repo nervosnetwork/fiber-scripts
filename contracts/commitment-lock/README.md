@@ -1,6 +1,6 @@
 # commitment-lock
 
-This is a simple commitment lock script for ckb payment channel network.
+This is a simple commitment lock script for ckb fiber network.
 
 The lock script args is the hash result of blake160(local_delay_epoch || local_delay_pubkey_hash || revocation_pubkey_hash || N * pending_htlc), to unlock this lock, the transaction must provide following fields in the witness:
 
