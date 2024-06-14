@@ -199,7 +199,7 @@ fn auth() -> Result<(), Error> {
                         // when input since is 0, it means the unlock logic is for remote_htlc pubkey and preimage
                         if preimage
                             .map(|p| htlc.payment_hash() != &blake2b_256(p)[0..20])
-                            .unwrap_or(false)
+                            .unwrap_or(true)
                         {
                             return Err(Error::PreimageError);
                         }
@@ -222,11 +222,11 @@ fn auth() -> Result<(), Error> {
                         // when input since is 0, it means the unlock logic is for local_htlc pubkey and preimage
                         if preimage
                             .map(|p| htlc.payment_hash() != &blake2b_256(p)[0..20])
-                            .unwrap_or(false)
+                            .unwrap_or(true)
                         {
                             return Err(Error::PreimageError);
                         }
-                        pubkey_hash.copy_from_slice(&htlc.local_htlc_pubkey_hash());
+                        pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
                     } else {
                         // when input since is not 0, it means the unlock logic is for remote_htlc pubkey and htlc expiry
                         let since = Since::new(raw_since_value);

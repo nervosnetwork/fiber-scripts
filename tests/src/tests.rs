@@ -490,19 +490,44 @@ fn test_commitment_lock_with_two_pending_htlcs() {
     let witness = [
         witness_script.clone(),
         vec![0x00],
-        signature,
+        signature.clone(),
         preimage1.to_vec(),
     ]
     .concat();
 
-    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
-    println!("tx: {:?}", tx);
-
-    // run
+    let success_tx = tx.as_advanced_builder().witness(witness.pack()).build();
     let cycles = context
-        .verify_tx(&tx, MAX_CYCLES)
+        .verify_tx(&success_tx, MAX_CYCLES)
         .expect("pass verification");
     println!("consume cycles: {}", cycles);
+
+    // sign with remote_htlc_pubkey and wrong preimage should fail
+    let witness = [
+        witness_script.clone(),
+        vec![0x00],
+        signature.clone(),
+        preimage2.to_vec(),
+    ]
+    .concat();
+
+    let fail_tx = tx.as_advanced_builder().witness(witness.pack()).build();
+
+    // run
+    let error = context
+        .verify_tx(&fail_tx, MAX_CYCLES)
+        .expect_err("wrong preimage should fail");
+    println!("error: {}", error);
+
+    // sign with remote_htlc_pubkey and empty preimage should fail
+    let witness = [witness_script.clone(), vec![0x00], signature].concat();
+
+    let fail_tx = tx.as_advanced_builder().witness(witness.pack()).build();
+
+    // run
+    let error = context
+        .verify_tx(&fail_tx, MAX_CYCLES)
+        .expect_err("empty preimage should fail");
+    println!("error: {}", error);
 
     // build transaction with local_htlc_pubkey unlock offered pending htlc 1
     let since = Since::from_timestamp(1711976400 + 1000, true).unwrap();
@@ -519,6 +544,36 @@ fn test_commitment_lock_with_two_pending_htlcs() {
     let tx = TransactionBuilder::default()
         .cell_deps(cell_deps.clone())
         .input(input)
+        .outputs(outputs.clone())
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // sign with local_htlc_pubkey
+    let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+
+    let signature = local_htlc_key1
+        .0
+        .sign_recoverable(&message.into())
+        .unwrap()
+        .serialize();
+    let witness = [witness_script.clone(), vec![0x00], signature.clone()].concat();
+
+    let success_tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    let cycles = context
+        .verify_tx(&success_tx, MAX_CYCLES)
+        .expect("pass verification");
+    println!("consume cycles: {}", cycles);
+
+    // sign with local_htlc_pubkey and none-expired since should fail
+    let since = Since::from_timestamp(1711976400 - 1000, true).unwrap();
+
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point.clone())
+        .since(since.as_u64().pack())
+        .build();
+    let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .input(input)
         .outputs(outputs)
         .outputs_data(outputs_data.pack())
         .build();
@@ -531,22 +586,13 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [
-        witness_script.clone(),
-        vec![0x00],
-        signature,
-        preimage1.to_vec(),
-    ]
-    .concat();
+    let witness = [witness_script.clone(), vec![0x00], signature].concat();
 
-    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
-    println!("tx: {:?}", tx);
-
-    // run
-    let cycles = context
-        .verify_tx(&tx, MAX_CYCLES)
-        .expect("pass verification");
-    println!("consume cycles: {}", cycles);
+    let fail_tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    let error = context
+        .verify_tx(&fail_tx, MAX_CYCLES)
+        .expect_err("none-expired since should fail");
+    println!("error: {}", error);
 
     // build transaction with remote_htlc_pubkey unlock received pending htlc 2
     let since = Since::from_timestamp(1712062800 + 1000, true).unwrap();
@@ -629,19 +675,40 @@ fn test_commitment_lock_with_two_pending_htlcs() {
     let witness = [
         witness_script.clone(),
         vec![0x01],
-        signature,
+        signature.clone(),
         preimage2.to_vec(),
     ]
     .concat();
 
-    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
-    println!("tx: {:?}", tx);
-
-    // run
+    let success_tx = tx.as_advanced_builder().witness(witness.pack()).build();
     let cycles = context
-        .verify_tx(&tx, MAX_CYCLES)
+        .verify_tx(&success_tx, MAX_CYCLES)
         .expect("pass verification");
     println!("consume cycles: {}", cycles);
+
+    // sign with local_htlc_pubkey and wrong preimage should fail
+    let witness = [
+        witness_script.clone(),
+        vec![0x01],
+        signature.clone(),
+        preimage1.to_vec(),
+    ]
+    .concat();
+
+    let fail_tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    let error = context
+        .verify_tx(&fail_tx, MAX_CYCLES)
+        .expect_err("wrong preimage should fail");
+    println!("error: {}", error);
+
+    // sign with local_htlc_pubkey and empty preimage should fail
+    let witness = [witness_script.clone(), vec![0x01], signature].concat();
+
+    let fail_tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    let error = context
+        .verify_tx(&fail_tx, MAX_CYCLES)
+        .expect_err("empty preimage should fail");
+    println!("error: {}", error);
 }
 
 #[test]
