@@ -152,6 +152,7 @@ fn test_funding_lock() {
     println!("signature: {:?}", aggregated_signature_1.to_bytes());
 
     let witness = [
+        [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0].to_vec(),
         version.to_vec(),
         funding_out_point.to_vec(),
         x_only_pub_key.to_vec(),

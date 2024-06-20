@@ -34,6 +34,7 @@ pub enum Error {
     // Add customized errors here...
     MultipleInputs,
     WitnessLenError,
+    EmptyWitnessArgsError,
     FundingOutPointError,
     AuthError,
 }
@@ -63,18 +64,22 @@ fn auth() -> Result<(), Error> {
         return Err(Error::MultipleInputs);
     }
     let witness = load_witness(0, Source::GroupInput)?;
-    if witness.len() != 8 + 36 + 32 + 64 {
+    if witness.len() != 16 + 8 + 36 + 32 + 64 {
         return Err(Error::WitnessLenError);
     }
     let tx_hash = load_tx_hash()?;
-    let version = witness[0..8].to_vec();
-    let funding_out_point = witness[8..44].to_vec();
+    let empty_witness_args = witness[0..16].to_vec();
+    let version = witness[16..24].to_vec();
+    let funding_out_point = witness[24..60].to_vec();
     let input_out_point = load_input_out_point(0, Source::GroupInput)?;
+    if empty_witness_args != [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0] {
+        return Err(Error::EmptyWitnessArgsError);
+    }
     if input_out_point.as_slice() != funding_out_point.as_slice() {
         return Err(Error::FundingOutPointError);
     }
     // Schnorr signature cannot recover the public key, so we need to provide the public key
-    let pubkey_and_signature = witness[44..].to_vec();
+    let pubkey_and_signature = witness[60..].to_vec();
     let message = blake2b_256([version, funding_out_point, tx_hash.to_vec()].concat());
 
     let mut pubkey_hash = [0u8; 20];
