@@ -15,8 +15,8 @@ use secp256k1::{
 };
 
 const MAX_CYCLES: u64 = 10_000_000;
-
 const BYTE_SHANNONS: u64 = 100_000_000;
+const EMPTY_WITNESS_ARGS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
 
 #[test]
 fn test_funding_lock() {
@@ -152,7 +152,7 @@ fn test_funding_lock() {
     println!("signature: {:?}", aggregated_signature_1.to_bytes());
 
     let witness = [
-        [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0].to_vec(),
+        EMPTY_WITNESS_ARGS.to_vec(),
         version.to_vec(),
         funding_out_point.to_vec(),
         x_only_pub_key.to_vec(),
@@ -251,7 +251,13 @@ fn test_commitment_lock_no_pending_htlcs() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script.clone(), vec![0xFF], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0xFF],
+        signature,
+    ]
+    .concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -285,7 +291,13 @@ fn test_commitment_lock_no_pending_htlcs() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script, vec![0xFF], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script,
+        vec![0xFF],
+        signature,
+    ]
+    .concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -401,7 +413,13 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script.clone(), vec![0xFF], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0xFF],
+        signature,
+    ]
+    .concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -435,7 +453,13 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script.clone(), vec![0xFF], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0xFF],
+        signature,
+    ]
+    .concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -489,6 +513,7 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .unwrap()
         .serialize();
     let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
         witness_script.clone(),
         vec![0x00],
         signature.clone(),
@@ -504,6 +529,7 @@ fn test_commitment_lock_with_two_pending_htlcs() {
 
     // sign with remote_htlc_pubkey and wrong preimage should fail
     let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
         witness_script.clone(),
         vec![0x00],
         signature.clone(),
@@ -520,7 +546,13 @@ fn test_commitment_lock_with_two_pending_htlcs() {
     println!("error: {}", error);
 
     // sign with remote_htlc_pubkey and empty preimage should fail
-    let witness = [witness_script.clone(), vec![0x00], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0x00],
+        signature,
+    ]
+    .concat();
 
     let fail_tx = tx.as_advanced_builder().witness(witness.pack()).build();
 
@@ -557,7 +589,13 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script.clone(), vec![0x00], signature.clone()].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0x00],
+        signature.clone(),
+    ]
+    .concat();
 
     let success_tx = tx.as_advanced_builder().witness(witness.pack()).build();
     let cycles = context
@@ -587,7 +625,13 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script.clone(), vec![0x00], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0x00],
+        signature,
+    ]
+    .concat();
 
     let fail_tx = tx.as_advanced_builder().witness(witness.pack()).build();
     let error = context
@@ -638,7 +682,13 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script.clone(), vec![0x01], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0x01],
+        signature,
+    ]
+    .concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -674,6 +724,7 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .unwrap()
         .serialize();
     let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
         witness_script.clone(),
         vec![0x01],
         signature.clone(),
@@ -689,6 +740,7 @@ fn test_commitment_lock_with_two_pending_htlcs() {
 
     // sign with local_htlc_pubkey and wrong preimage should fail
     let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
         witness_script.clone(),
         vec![0x01],
         signature.clone(),
@@ -703,7 +755,13 @@ fn test_commitment_lock_with_two_pending_htlcs() {
     println!("error: {}", error);
 
     // sign with local_htlc_pubkey and empty preimage should fail
-    let witness = [witness_script.clone(), vec![0x01], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0x01],
+        signature,
+    ]
+    .concat();
 
     let fail_tx = tx.as_advanced_builder().witness(witness.pack()).build();
     let error = context
@@ -829,7 +887,13 @@ fn test_commitment_lock_with_two_pending_htlcs_and_sudt() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script.clone(), vec![0xFF], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0xFF],
+        signature,
+    ]
+    .concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -863,7 +927,13 @@ fn test_commitment_lock_with_two_pending_htlcs_and_sudt() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script.clone(), vec![0xFF], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0xFF],
+        signature,
+    ]
+    .concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -921,6 +991,7 @@ fn test_commitment_lock_with_two_pending_htlcs_and_sudt() {
         .unwrap()
         .serialize();
     let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
         witness_script.clone(),
         vec![0x00],
         signature,
@@ -966,6 +1037,7 @@ fn test_commitment_lock_with_two_pending_htlcs_and_sudt() {
         .unwrap()
         .serialize();
     let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
         witness_script.clone(),
         vec![0x00],
         signature,
@@ -1029,7 +1101,13 @@ fn test_commitment_lock_with_two_pending_htlcs_and_sudt() {
         .sign_recoverable(&message.into())
         .unwrap()
         .serialize();
-    let witness = [witness_script.clone(), vec![0x01], signature].concat();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        witness_script.clone(),
+        vec![0x01],
+        signature,
+    ]
+    .concat();
 
     let tx = tx.as_advanced_builder().witness(witness.pack()).build();
     println!("tx: {:?}", tx);
@@ -1066,6 +1144,7 @@ fn test_commitment_lock_with_two_pending_htlcs_and_sudt() {
         .unwrap()
         .serialize();
     let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
         witness_script.clone(),
         vec![0x01],
         signature,

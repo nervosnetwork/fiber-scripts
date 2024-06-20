@@ -12,7 +12,7 @@ ckb_std::entry!(program_entry);
 #[cfg(not(test))]
 default_alloc!();
 
-use alloc::ffi::CString;
+use alloc::{ffi::CString, vec::Vec};
 use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, core::ScriptHashType, prelude::*},
@@ -58,28 +58,34 @@ pub fn program_entry() -> i8 {
     }
 }
 
+// a placeholder for empty witness args, to resolve the issue of xudt compatibility
+const EMPTY_WITNESS_ARGS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+
 fn auth() -> Result<(), Error> {
     // funding lock will be unlocked by the commitment transaction, it should only have one input
     if load_input_since(1, Source::GroupInput).is_ok() {
         return Err(Error::MultipleInputs);
     }
-    let witness = load_witness(0, Source::GroupInput)?;
-    if witness.len() != 16 + 8 + 36 + 32 + 64 {
+    let mut witness = load_witness(0, Source::GroupInput)?;
+    if witness
+        .drain(0..EMPTY_WITNESS_ARGS.len())
+        .collect::<Vec<_>>()
+        != EMPTY_WITNESS_ARGS
+    {
+        return Err(Error::EmptyWitnessArgsError);
+    }
+    if witness.len() != 8 + 36 + 32 + 64 {
         return Err(Error::WitnessLenError);
     }
     let tx_hash = load_tx_hash()?;
-    let empty_witness_args = witness[0..16].to_vec();
-    let version = witness[16..24].to_vec();
-    let funding_out_point = witness[24..60].to_vec();
+    let version = witness[0..8].to_vec();
+    let funding_out_point = witness[8..44].to_vec();
     let input_out_point = load_input_out_point(0, Source::GroupInput)?;
-    if empty_witness_args != [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0] {
-        return Err(Error::EmptyWitnessArgsError);
-    }
     if input_out_point.as_slice() != funding_out_point.as_slice() {
         return Err(Error::FundingOutPointError);
     }
     // Schnorr signature cannot recover the public key, so we need to provide the public key
-    let pubkey_and_signature = witness[60..].to_vec();
+    let pubkey_and_signature = witness[44..].to_vec();
     let message = blake2b_256([version, funding_out_point, tx_hash.to_vec()].concat());
 
     let mut pubkey_hash = [0u8; 20];
