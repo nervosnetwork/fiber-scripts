@@ -40,6 +40,7 @@ pub enum Error {
     InvalidHtlcType,
     ArgsLenError,
     WitnessLenError,
+    EmptyWitnessArgsError,
     WitnessHashError,
     OutputCapacityError,
     OutputLockError,
@@ -68,6 +69,8 @@ pub fn program_entry() -> i8 {
     }
 }
 
+// a placeholder for empty witness args, to resolve the issue of xudt compatibility
+const EMPTY_WITNESS_ARGS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
 // min witness script length: 8 (local_delay_epoch) + 20 (local_delay_pubkey_hash) + 20 (revocation_pubkey_hash) = 48
 const MIN_WITNESS_SCRIPT_LEN: usize = 48;
 // HTLC script length: 1 (htlc_type) + 16 (payment_amount) + 20 (payment_hash) + 20 (remote_htlc_pubkey_hash) + 20 (local_htlc_pubkey_hash) + 8 (htlc_expiry) = 85
@@ -120,7 +123,14 @@ fn auth() -> Result<(), Error> {
     if args.len() != 20 {
         return Err(Error::ArgsLenError);
     }
-    let witness = load_witness(0, Source::GroupInput)?;
+    let mut witness = load_witness(0, Source::GroupInput)?;
+    if witness
+        .drain(0..EMPTY_WITNESS_ARGS.len())
+        .collect::<Vec<_>>()
+        != EMPTY_WITNESS_ARGS
+    {
+        return Err(Error::EmptyWitnessArgsError);
+    }
     let witness_len = witness.len();
     if witness_len < MIN_WITNESS_LEN {
         return Err(Error::WitnessLenError);

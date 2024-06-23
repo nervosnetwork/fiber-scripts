@@ -4,6 +4,7 @@ This is a simple commitment lock script for ckb fiber network.
 
 The lock script args is the hash result of blake160(local_delay_epoch || local_delay_pubkey_hash || revocation_pubkey_hash || N * pending_htlc), to unlock this lock, the transaction must provide following fields in the witness:
 
+- `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 - `local_delay_epoch`: 8 bytes, u64 in little endian, must be a relative EpochNumberWithFraction
 - `local_delay_pubkey_hash`: 20 bytes, hash result of blake160(local_delay_pubkey)
 - `revocation_pubkey_hash`: 20 bytes, hash result of blake160(revocation_pubkey)

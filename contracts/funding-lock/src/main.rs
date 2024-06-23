@@ -12,7 +12,7 @@ ckb_std::entry!(program_entry);
 #[cfg(not(test))]
 default_alloc!();
 
-use alloc::ffi::CString;
+use alloc::{ffi::CString, vec::Vec};
 use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, core::ScriptHashType, prelude::*},
@@ -34,6 +34,7 @@ pub enum Error {
     // Add customized errors here...
     MultipleInputs,
     WitnessLenError,
+    EmptyWitnessArgsError,
     FundingOutPointError,
     AuthError,
 }
@@ -57,12 +58,22 @@ pub fn program_entry() -> i8 {
     }
 }
 
+// a placeholder for empty witness args, to resolve the issue of xudt compatibility
+const EMPTY_WITNESS_ARGS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+
 fn auth() -> Result<(), Error> {
     // funding lock will be unlocked by the commitment transaction, it should only have one input
     if load_input_since(1, Source::GroupInput).is_ok() {
         return Err(Error::MultipleInputs);
     }
-    let witness = load_witness(0, Source::GroupInput)?;
+    let mut witness = load_witness(0, Source::GroupInput)?;
+    if witness
+        .drain(0..EMPTY_WITNESS_ARGS.len())
+        .collect::<Vec<_>>()
+        != EMPTY_WITNESS_ARGS
+    {
+        return Err(Error::EmptyWitnessArgsError);
+    }
     if witness.len() != 8 + 36 + 32 + 64 {
         return Err(Error::WitnessLenError);
     }
