@@ -661,6 +661,7 @@ dependencies = [
  "ckb-hash 0.114.0",
  "ckb-std",
  "hex",
+ "sha2",
 ]
 
 [[package]]
@@ -1463,6 +1464,7 @@ dependencies = [
  "musig2",
  "secp256k1 0.28.2",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
