@@ -24,6 +24,7 @@ use ckb_std::{
     since::Since,
 };
 use hex::encode;
+use sha2::{Digest, Sha256};
 
 include!(concat!(env!("OUT_DIR"), "/auth_code_hash.rs"));
 
@@ -80,11 +81,33 @@ const UNLOCK_WITH_SIGNATURE_LEN: usize = 66;
 const PREIMAGE_LEN: usize = 32;
 const MIN_WITNESS_LEN: usize = MIN_WITNESS_SCRIPT_LEN + UNLOCK_WITH_SIGNATURE_LEN;
 
+enum HtlcType {
+    Offered,
+    Received,
+}
+
+enum PaymentHashType {
+    Blake2b,
+    Sha256,
+}
+
 struct Htlc<'a>(&'a [u8]);
 
 impl<'a> Htlc<'a> {
-    pub fn htlc_type(&self) -> u8 {
-        self.0[0]
+    pub fn htlc_type(&self) -> HtlcType {
+        if self.0[0] & 0b00000001 == 0 {
+            HtlcType::Offered
+        } else {
+            HtlcType::Received
+        }
+    }
+
+    pub fn payment_hash_type(&self) -> PaymentHashType {
+        if (self.0[0] >> 1) & 0b0000001 == 0 {
+            PaymentHashType::Blake2b
+        } else {
+            PaymentHashType::Sha256
+        }
     }
 
     pub fn payment_amount(&self) -> u128 {
@@ -202,54 +225,67 @@ fn auth() -> Result<(), Error> {
         {
             let htlc = Htlc(htlc_script);
             if unlock_htlc == i {
-                if htlc.htlc_type() == 0 {
-                    // offered HTLC
-                    let raw_since_value = load_input_since(0, Source::GroupInput)?;
-                    if raw_since_value == 0 {
-                        // when input since is 0, it means the unlock logic is for remote_htlc pubkey and preimage
-                        if preimage
-                            .map(|p| htlc.payment_hash() != &blake2b_256(p)[0..20])
-                            .unwrap_or(true)
-                        {
-                            return Err(Error::PreimageError);
-                        }
-                        new_amount -= htlc.payment_amount();
-                        pubkey_hash.copy_from_slice(htlc.remote_htlc_pubkey_hash());
-                    } else {
-                        // when input since is not 0, it means the unlock logic is for local_htlc pubkey and htlc expiry
-                        let since = Since::new(raw_since_value);
-                        let htlc_expiry = Since::new(htlc.htlc_expiry());
-                        if since >= htlc_expiry {
-                            pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
-                        } else {
-                            return Err(Error::InvalidSince);
-                        }
-                    }
-                } else if htlc.htlc_type() == 1 {
-                    // received HTLC
-                    let raw_since_value = load_input_since(0, Source::GroupInput)?;
-                    if raw_since_value == 0 {
-                        // when input since is 0, it means the unlock logic is for local_htlc pubkey and preimage
-                        if preimage
-                            .map(|p| htlc.payment_hash() != &blake2b_256(p)[0..20])
-                            .unwrap_or(true)
-                        {
-                            return Err(Error::PreimageError);
-                        }
-                        pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
-                    } else {
-                        // when input since is not 0, it means the unlock logic is for remote_htlc pubkey and htlc expiry
-                        let since = Since::new(raw_since_value);
-                        let htlc_expiry = Since::new(htlc.htlc_expiry());
-                        if since >= htlc_expiry {
+                match htlc.htlc_type() {
+                    HtlcType::Offered => {
+                        let raw_since_value = load_input_since(0, Source::GroupInput)?;
+                        if raw_since_value == 0 {
+                            // when input since is 0, it means the unlock logic is for remote_htlc pubkey and preimage
+                            if preimage
+                                .map(|p| match htlc.payment_hash_type() {
+                                    PaymentHashType::Blake2b => {
+                                        htlc.payment_hash() != &blake2b_256(p)[0..20]
+                                    }
+                                    PaymentHashType::Sha256 => {
+                                        htlc.payment_hash() != &Sha256::digest(p)[0..20]
+                                    }
+                                })
+                                .unwrap_or(true)
+                            {
+                                return Err(Error::PreimageError);
+                            }
                             new_amount -= htlc.payment_amount();
                             pubkey_hash.copy_from_slice(htlc.remote_htlc_pubkey_hash());
                         } else {
-                            return Err(Error::InvalidSince);
+                            // when input since is not 0, it means the unlock logic is for local_htlc pubkey and htlc expiry
+                            let since = Since::new(raw_since_value);
+                            let htlc_expiry = Since::new(htlc.htlc_expiry());
+                            if since >= htlc_expiry {
+                                pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
+                            } else {
+                                return Err(Error::InvalidSince);
+                            }
                         }
                     }
-                } else {
-                    return Err(Error::InvalidHtlcType);
+                    HtlcType::Received => {
+                        let raw_since_value = load_input_since(0, Source::GroupInput)?;
+                        if raw_since_value == 0 {
+                            // when input since is 0, it means the unlock logic is for local_htlc pubkey and preimage
+                            if preimage
+                                .map(|p| match htlc.payment_hash_type() {
+                                    PaymentHashType::Blake2b => {
+                                        htlc.payment_hash() != &blake2b_256(p)[0..20]
+                                    }
+                                    PaymentHashType::Sha256 => {
+                                        htlc.payment_hash() != &Sha256::digest(p)[0..20]
+                                    }
+                                })
+                                .unwrap_or(true)
+                            {
+                                return Err(Error::PreimageError);
+                            }
+                            pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
+                        } else {
+                            // when input since is not 0, it means the unlock logic is for remote_htlc pubkey and htlc expiry
+                            let since = Since::new(raw_since_value);
+                            let htlc_expiry = Since::new(htlc.htlc_expiry());
+                            if since >= htlc_expiry {
+                                new_amount -= htlc.payment_amount();
+                                pubkey_hash.copy_from_slice(htlc.remote_htlc_pubkey_hash());
+                            } else {
+                                return Err(Error::InvalidSince);
+                            }
+                        }
+                    }
                 }
             } else {
                 new_witness_script.push(htlc_script);
