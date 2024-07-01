@@ -15,7 +15,7 @@ default_alloc!();
 use alloc::{ffi::CString, vec::Vec};
 use ckb_std::{
     ckb_constants::Source,
-    ckb_types::{bytes::Bytes, core::ScriptHashType, prelude::*},
+    ckb_types::{bytes::Bytes, core::ScriptHashType, packed::TransactionReader, prelude::*},
     error::SysError,
     high_level::{
         exec_cell, load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type,
@@ -43,6 +43,9 @@ pub enum Error {
     WitnessLenError,
     EmptyWitnessArgsError,
     WitnessHashError,
+    InvalidFundingTx,
+    InvalidNewVersionCommitmentTx,
+    InvalidOutPoint,
     OutputCapacityError,
     OutputLockError,
     OutputTypeError,
@@ -72,14 +75,13 @@ pub fn program_entry() -> i8 {
 
 // a placeholder for empty witness args, to resolve the issue of xudt compatibility
 const EMPTY_WITNESS_ARGS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-// min witness script length: 8 (local_delay_epoch) + 20 (local_delay_pubkey_hash) + 20 (revocation_pubkey_hash) = 48
-const MIN_WITNESS_SCRIPT_LEN: usize = 48;
+// min witness script length: 8 (local_delay_epoch) + 20 (local_delay_pubkey_hash) + 1 (pending_htlc_count) = 29
+const MIN_WITNESS_SCRIPT_LEN: usize = 29;
 // HTLC script length: 1 (htlc_type) + 16 (payment_amount) + 20 (payment_hash) + 20 (remote_htlc_pubkey_hash) + 20 (local_htlc_pubkey_hash) + 8 (htlc_expiry) = 85
 const HTLC_SCRIPT_LEN: usize = 85;
-// 1 (unlock_type) + 65 (signature) = 66
-const UNLOCK_WITH_SIGNATURE_LEN: usize = 66;
+const SIGNATURE_LEN: usize = 65;
 const PREIMAGE_LEN: usize = 32;
-const MIN_WITNESS_LEN: usize = MIN_WITNESS_SCRIPT_LEN + UNLOCK_WITH_SIGNATURE_LEN;
+const ZERO_INDEX: &[u8] = &[0, 0, 0, 0];
 
 enum HtlcType {
     Offered,
@@ -132,8 +134,7 @@ impl<'a> Htlc<'a> {
 }
 
 fn auth() -> Result<(), Error> {
-    // since local_delay_pubkey and revocation_pubkey are derived, the scripts are usually unique,
-    // to simplify the implementation of the following unlocking logic, we check the number of inputs should be 1
+    // since local_delay_pubkey is derived, the scripts are usually unique, to simplify the implementation of the following unlocking logic, we check the number of inputs should be 1
     if load_input_since(1, Source::GroupInput).is_ok() {
         return Err(Error::MultipleInputs);
     }
@@ -143,9 +144,10 @@ fn auth() -> Result<(), Error> {
 
     let script = load_script()?;
     let args: Bytes = script.args().unpack();
-    if args.len() != 20 {
+    if args.len() != 60 {
         return Err(Error::ArgsLenError);
     }
+
     let mut witness = load_witness(0, Source::GroupInput)?;
     if witness
         .drain(0..EMPTY_WITNESS_ARGS.len())
@@ -154,197 +156,314 @@ fn auth() -> Result<(), Error> {
     {
         return Err(Error::EmptyWitnessArgsError);
     }
-    let witness_len = witness.len();
-    if witness_len < MIN_WITNESS_LEN {
-        return Err(Error::WitnessLenError);
-    }
-    let (pending_htlcs, preimage) = match witness_len {
-        MIN_WITNESS_LEN => (0, None),
-        _ => match (witness_len - MIN_WITNESS_LEN) % HTLC_SCRIPT_LEN {
-            0 => ((witness_len - MIN_WITNESS_LEN) / HTLC_SCRIPT_LEN, None),
-            PREIMAGE_LEN => (
-                (witness_len - PREIMAGE_LEN - MIN_WITNESS_LEN) / HTLC_SCRIPT_LEN,
-                Some(&witness[witness_len - PREIMAGE_LEN..]),
-            ),
-            _ => return Err(Error::WitnessLenError),
-        },
-    };
-
-    // verify the hash of the witness script part is equal to the script args
-    let witness_script_len = witness_len
-        - if preimage.is_some() {
-            UNLOCK_WITH_SIGNATURE_LEN + PREIMAGE_LEN
-        } else {
-            UNLOCK_WITH_SIGNATURE_LEN
-        };
-    if blake2b_256(&witness[0..witness_script_len])[0..20] != args[0..20] {
-        return Err(Error::WitnessHashError);
-    }
-
-    let unlock_type = witness[witness_script_len];
-    let signature = witness[witness_script_len + 1..witness_script_len + 66].to_vec();
-
-    let message = load_tx_hash()?;
-    let mut pubkey_hash = [0u8; 20];
-
+    let unlock_type = witness.remove(0);
     if unlock_type == 0xFF {
-        // unlock with revocation or local_delay pubkey
+        // revocation unlock process
+        // 1. verify the funding tx is correct
+        let funding_tx_len: [u8; 4] = witness[0..4].try_into().unwrap();
+        let funding_tx_len: usize = u32::from_le_bytes(funding_tx_len) as usize;
+        let funding_tx = TransactionReader::from_slice(&witness[0..funding_tx_len])
+            .map_err(|_e| Error::InvalidFundingTx)?;
+        let funding_tx_hash = args[8..40].as_ref();
+        if funding_tx.calc_tx_hash().as_slice() != funding_tx_hash {
+            return Err(Error::InvalidFundingTx);
+        }
+
+        // 2. verify the commitment txs consume the same funding cell
+        let new_version_commitment_tx = TransactionReader::from_slice(&witness[funding_tx_len..])
+            .map_err(|_e| Error::InvalidNewVersionCommitmentTx)?;
+        let new_version_commitment_tx_out_point = new_version_commitment_tx
+            .raw()
+            .inputs()
+            .get(0)
+            .unwrap()
+            .previous_output();
+        if new_version_commitment_tx_out_point.tx_hash().as_slice() != funding_tx_hash
+            || new_version_commitment_tx_out_point.index().as_slice() != ZERO_INDEX
+        {
+            return Err(Error::InvalidOutPoint);
+        }
+
+        // 3. verify the new_version_commitment_tx has the higher version number
+        let current_version: [u8; 8] = args[0..8].try_into().unwrap();
+        let new_version: [u8; 8] = new_version_commitment_tx
+            .raw()
+            .outputs()
+            .get(0)
+            .unwrap()
+            .lock()
+            .args()
+            .raw_data()[0..8]
+            .try_into()
+            .unwrap();
+        if current_version >= new_version {
+            return Err(Error::InvalidNewVersionCommitmentTx);
+        }
+
+        // 4. verify the output cell is correct
+        let output_lock = load_cell_lock(0, Source::Output)?;
+        let expected_lock = new_version_commitment_tx
+            .raw()
+            .outputs()
+            .get(1)
+            .unwrap()
+            .lock()
+            .to_entity();
+        if output_lock.as_slice() != expected_lock.as_slice() {
+            return Err(Error::OutputLockError);
+        }
+
+        let output_type = load_cell_type(0, Source::Output)?.pack();
+        let expected_type = new_version_commitment_tx
+            .raw()
+            .outputs()
+            .get(1)
+            .unwrap()
+            .type_()
+            .to_entity();
+        if output_type.as_slice() != expected_type.as_slice() {
+            return Err(Error::OutputTypeError);
+        }
+
+        let output_capacity = load_cell_capacity(0, Source::Output)?;
+        if output_capacity != load_cell_capacity(0, Source::GroupInput)? {
+            return Err(Error::OutputCapacityError);
+        }
+
+        let output_data = load_cell_data(0, Source::Output)?;
+        if output_data != load_cell_data(0, Source::GroupInput)? {
+            return Err(Error::OutputUdtAmountError);
+        }
+
+        // 5. verify the new_version_commitment_tx's signature is correct
+        let pubkey_hash: [u8; 20] = funding_tx
+            .raw()
+            .outputs()
+            .get(0)
+            .unwrap()
+            .lock()
+            .args()
+            .raw_data()[0..20]
+            .try_into()
+            .unwrap();
+
+        let new_version_commitment_tx_hash = new_version_commitment_tx.calc_tx_hash();
+        let mut new_version_commitment_witness = new_version_commitment_tx
+            .witnesses()
+            .get(0)
+            .unwrap()
+            .raw_data()
+            .to_vec();
+        new_version_commitment_witness.drain(0..EMPTY_WITNESS_ARGS.len());
+
+        // AuthAlgorithmIdSchnorr = 7
+        let algorithm_id_str = CString::new(encode([7u8])).unwrap();
+        let signature_str = CString::new(encode(new_version_commitment_witness)).unwrap();
+        let message_str = CString::new(encode(new_version_commitment_tx_hash.as_slice())).unwrap();
+        let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();
+
+        let args = [
+            algorithm_id_str.as_c_str(),
+            signature_str.as_c_str(),
+            message_str.as_c_str(),
+            pubkey_hash_str.as_c_str(),
+        ];
+
+        exec_cell(&AUTH_CODE_HASH, ScriptHashType::Data1, &args).map_err(|_| Error::AuthError)?;
+        return Ok(());
+    } else {
+        // normal unlock process
+        // verify the hash of the witness script part is equal to the script args
+        let witness_len = witness.len();
+        let pending_htlc_count = witness[MIN_WITNESS_SCRIPT_LEN - 1] as usize;
+        let witness_script_len = MIN_WITNESS_SCRIPT_LEN + pending_htlc_count * HTLC_SCRIPT_LEN;
+        if witness_len < witness_script_len {
+            return Err(Error::WitnessLenError);
+        }
+        if blake2b_256(&witness[0..witness_script_len])[0..20] != args[40..60] {
+            return Err(Error::WitnessHashError);
+        }
+
         let raw_since_value = load_input_since(0, Source::GroupInput)?;
-        if raw_since_value == 0 {
-            // when input since is 0, it means the unlock logic is for revocation, verify the revocation pubkey
-            pubkey_hash.copy_from_slice(&witness[28..48]);
-        } else {
-            // when input since is not 0, it means the unlock logic is for local_delay, verify the local_delay pubkey and delay
+        let message = load_tx_hash()?;
+        let mut signature = [0u8; 65];
+        let mut pubkey_hash = [0u8; 20];
+
+        if unlock_type == 0xFE {
+            // non-pending HTLC unlock process
             let since = Since::new(raw_since_value);
             let local_delay_epoch =
                 Since::new(u64::from_le_bytes(witness[0..8].try_into().unwrap()));
             if since >= local_delay_epoch {
+                let expected_witness_len = witness_script_len + SIGNATURE_LEN;
+                if witness_len != expected_witness_len {
+                    return Err(Error::WitnessLenError);
+                }
+                signature.copy_from_slice(&witness[witness_script_len..]);
                 pubkey_hash.copy_from_slice(&witness[8..28]);
             } else {
                 return Err(Error::InvalidSince);
             }
-        }
-    } else {
-        let unlock_htlc = unlock_type as usize;
-        if unlock_htlc >= pending_htlcs {
-            return Err(Error::InvalidUnlockType);
-        }
-
-        let mut new_amount = if type_script.is_some() {
-            let input_cell_data = load_cell_data(0, Source::GroupInput)?;
-            u128::from_le_bytes(input_cell_data[0..16].try_into().unwrap())
         } else {
-            load_cell_capacity(0, Source::GroupInput)? as u128
-        };
-        let mut new_witness_script: Vec<&[u8]> = Vec::new();
-        new_witness_script.push(&witness[0..MIN_WITNESS_SCRIPT_LEN]);
+            // pending HTLC unlock process
+            let unlock_htlc = unlock_type as usize;
+            if unlock_htlc >= pending_htlc_count {
+                return Err(Error::InvalidUnlockType);
+            }
 
-        for (i, htlc_script) in witness[MIN_WITNESS_SCRIPT_LEN..witness_script_len]
-            .chunks(HTLC_SCRIPT_LEN)
-            .enumerate()
-        {
-            let htlc = Htlc(htlc_script);
-            if unlock_htlc == i {
-                match htlc.htlc_type() {
-                    HtlcType::Offered => {
-                        let raw_since_value = load_input_since(0, Source::GroupInput)?;
-                        if raw_since_value == 0 {
-                            // when input since is 0, it means the unlock logic is for remote_htlc pubkey and preimage
-                            if preimage
-                                .map(|p| match htlc.payment_hash_type() {
+            if raw_since_value == 0 {
+                let expected_witness_len = witness_script_len + SIGNATURE_LEN + PREIMAGE_LEN;
+                if witness_len != expected_witness_len {
+                    return Err(Error::WitnessLenError);
+                }
+                signature.copy_from_slice(
+                    &witness[witness_script_len..witness_script_len + SIGNATURE_LEN],
+                );
+            } else {
+                let expected_witness_len = witness_script_len + SIGNATURE_LEN;
+                if witness_len != expected_witness_len {
+                    return Err(Error::WitnessLenError);
+                }
+                signature.copy_from_slice(&witness[witness_script_len..]);
+            }
+
+            let mut new_amount = if type_script.is_some() {
+                let input_cell_data = load_cell_data(0, Source::GroupInput)?;
+                u128::from_le_bytes(input_cell_data[0..16].try_into().unwrap())
+            } else {
+                load_cell_capacity(0, Source::GroupInput)? as u128
+            };
+            let mut new_witness_script: Vec<&[u8]> = Vec::new();
+            new_witness_script.push(&witness[0..MIN_WITNESS_SCRIPT_LEN - 1]);
+            let new_pending_htlc_count = [(pending_htlc_count - 1) as u8];
+            new_witness_script.push(&new_pending_htlc_count);
+
+            for (i, htlc_script) in witness[MIN_WITNESS_SCRIPT_LEN..witness_script_len]
+                .chunks(HTLC_SCRIPT_LEN)
+                .enumerate()
+            {
+                let htlc = Htlc(htlc_script);
+                if unlock_htlc == i {
+                    match htlc.htlc_type() {
+                        HtlcType::Offered => {
+                            if raw_since_value == 0 {
+                                // when input since is 0, it means the unlock logic is for remote_htlc pubkey and preimage
+                                let preimage = &witness[witness_script_len + SIGNATURE_LEN..];
+                                if match htlc.payment_hash_type() {
                                     PaymentHashType::Blake2b => {
-                                        htlc.payment_hash() != &blake2b_256(p)[0..20]
+                                        htlc.payment_hash() != &blake2b_256(preimage)[0..20]
                                     }
                                     PaymentHashType::Sha256 => {
-                                        htlc.payment_hash() != &Sha256::digest(p)[0..20]
+                                        htlc.payment_hash() != &Sha256::digest(preimage)[0..20]
                                     }
-                                })
-                                .unwrap_or(true)
-                            {
-                                return Err(Error::PreimageError);
-                            }
-                            new_amount -= htlc.payment_amount();
-                            pubkey_hash.copy_from_slice(htlc.remote_htlc_pubkey_hash());
-                        } else {
-                            // when input since is not 0, it means the unlock logic is for local_htlc pubkey and htlc expiry
-                            let since = Since::new(raw_since_value);
-                            let htlc_expiry = Since::new(htlc.htlc_expiry());
-                            if since >= htlc_expiry {
-                                pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
-                            } else {
-                                return Err(Error::InvalidSince);
-                            }
-                        }
-                    }
-                    HtlcType::Received => {
-                        let raw_since_value = load_input_since(0, Source::GroupInput)?;
-                        if raw_since_value == 0 {
-                            // when input since is 0, it means the unlock logic is for local_htlc pubkey and preimage
-                            if preimage
-                                .map(|p| match htlc.payment_hash_type() {
-                                    PaymentHashType::Blake2b => {
-                                        htlc.payment_hash() != &blake2b_256(p)[0..20]
-                                    }
-                                    PaymentHashType::Sha256 => {
-                                        htlc.payment_hash() != &Sha256::digest(p)[0..20]
-                                    }
-                                })
-                                .unwrap_or(true)
-                            {
-                                return Err(Error::PreimageError);
-                            }
-                            pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
-                        } else {
-                            // when input since is not 0, it means the unlock logic is for remote_htlc pubkey and htlc expiry
-                            let since = Since::new(raw_since_value);
-                            let htlc_expiry = Since::new(htlc.htlc_expiry());
-                            if since >= htlc_expiry {
+                                } {
+                                    return Err(Error::PreimageError);
+                                }
                                 new_amount -= htlc.payment_amount();
                                 pubkey_hash.copy_from_slice(htlc.remote_htlc_pubkey_hash());
                             } else {
-                                return Err(Error::InvalidSince);
+                                // when input since is not 0, it means the unlock logic is for local_htlc pubkey and htlc expiry
+                                let since = Since::new(raw_since_value);
+                                let htlc_expiry = Since::new(htlc.htlc_expiry());
+                                if since >= htlc_expiry {
+                                    pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
+                                } else {
+                                    return Err(Error::InvalidSince);
+                                }
+                            }
+                        }
+                        HtlcType::Received => {
+                            if raw_since_value == 0 {
+                                // when input since is 0, it means the unlock logic is for local_htlc pubkey and preimage
+                                let preimage = &witness[witness_script_len + SIGNATURE_LEN..];
+                                if match htlc.payment_hash_type() {
+                                    PaymentHashType::Blake2b => {
+                                        htlc.payment_hash() != &blake2b_256(preimage)[0..20]
+                                    }
+                                    PaymentHashType::Sha256 => {
+                                        htlc.payment_hash() != &Sha256::digest(preimage)[0..20]
+                                    }
+                                } {
+                                    return Err(Error::PreimageError);
+                                }
+                                pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
+                            } else {
+                                // when input since is not 0, it means the unlock logic is for remote_htlc pubkey and htlc expiry
+                                let since = Since::new(raw_since_value);
+                                let htlc_expiry = Since::new(htlc.htlc_expiry());
+                                if since >= htlc_expiry {
+                                    new_amount -= htlc.payment_amount();
+                                    pubkey_hash.copy_from_slice(htlc.remote_htlc_pubkey_hash());
+                                } else {
+                                    return Err(Error::InvalidSince);
+                                }
                             }
                         }
                     }
+                } else {
+                    new_witness_script.push(htlc_script);
                 }
-            } else {
-                new_witness_script.push(htlc_script);
+            }
+
+            // verify the first output cell's lock script is correct
+            let output_lock = load_cell_lock(0, Source::Output)?;
+            let expected_lock_args = [
+                &args[0..40],
+                blake2b_256(new_witness_script.concat())[0..20].as_ref(),
+            ]
+            .concat()
+            .pack();
+            if output_lock.code_hash() != script.code_hash()
+                || output_lock.hash_type() != script.hash_type()
+                || output_lock.args() != expected_lock_args
+            {
+                return Err(Error::OutputLockError);
+            }
+
+            match type_script {
+                Some(udt_script) => {
+                    // verify the first output cell's capacity, type script and udt amount are correct
+                    let output_capacity = load_cell_capacity(0, Source::Output)?;
+                    let input_capacity = load_cell_capacity(0, Source::GroupInput)?;
+                    if output_capacity != input_capacity {
+                        return Err(Error::OutputCapacityError);
+                    }
+
+                    let output_type = load_cell_type(0, Source::Output)?;
+                    if output_type != Some(udt_script) {
+                        return Err(Error::OutputTypeError);
+                    }
+
+                    let output_data = load_cell_data(0, Source::Output)?;
+                    let output_amount = u128::from_le_bytes(output_data[0..16].try_into().unwrap());
+                    if output_amount != new_amount {
+                        return Err(Error::OutputUdtAmountError);
+                    }
+                }
+                None => {
+                    // verify the first output cell's capacity is correct
+                    let output_capacity = load_cell_capacity(0, Source::Output)? as u128;
+                    if output_capacity != new_amount {
+                        return Err(Error::OutputCapacityError);
+                    }
+                }
             }
         }
 
-        // verify the first output cell's lock script is correct
-        let output_lock = load_cell_lock(0, Source::Output)?;
-        let expected_lock_args = blake2b_256(new_witness_script.concat())[0..20].pack();
-        if output_lock.code_hash() != script.code_hash()
-            || output_lock.hash_type() != script.hash_type()
-            || output_lock.args() != expected_lock_args
-        {
-            return Err(Error::OutputLockError);
-        }
+        // AuthAlgorithmIdCkb = 0
+        let algorithm_id_str = CString::new(encode([0u8])).unwrap();
+        let signature_str = CString::new(encode(signature)).unwrap();
+        let message_str = CString::new(encode(message)).unwrap();
+        let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();
 
-        match type_script {
-            Some(udt_script) => {
-                // verify the first output cell's capacity, type script and udt amount are correct
-                let output_capacity = load_cell_capacity(0, Source::Output)?;
-                let input_capacity = load_cell_capacity(0, Source::GroupInput)?;
-                if output_capacity != input_capacity {
-                    return Err(Error::OutputCapacityError);
-                }
+        let args = [
+            algorithm_id_str.as_c_str(),
+            signature_str.as_c_str(),
+            message_str.as_c_str(),
+            pubkey_hash_str.as_c_str(),
+        ];
 
-                let output_type = load_cell_type(0, Source::Output)?;
-                if output_type != Some(udt_script) {
-                    return Err(Error::OutputTypeError);
-                }
-
-                let output_data = load_cell_data(0, Source::Output)?;
-                let output_amount = u128::from_le_bytes(output_data[0..16].try_into().unwrap());
-                if output_amount != new_amount {
-                    return Err(Error::OutputUdtAmountError);
-                }
-            }
-            None => {
-                // verify the first output cell's capacity is correct
-                let output_capacity = load_cell_capacity(0, Source::Output)? as u128;
-                if output_capacity != new_amount {
-                    return Err(Error::OutputCapacityError);
-                }
-            }
-        }
+        exec_cell(&AUTH_CODE_HASH, ScriptHashType::Data1, &args).map_err(|_| Error::AuthError)?;
+        Ok(())
     }
-
-    // AuthAlgorithmIdCkb = 0
-    let algorithm_id_str = CString::new(encode([0u8])).unwrap();
-    let signature_str = CString::new(encode(signature)).unwrap();
-    let message_str = CString::new(encode(message)).unwrap();
-    let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();
-
-    let args = [
-        algorithm_id_str.as_c_str(),
-        signature_str.as_c_str(),
-        message_str.as_c_str(),
-        pubkey_hash_str.as_c_str(),
-    ];
-
-    exec_cell(&AUTH_CODE_HASH, ScriptHashType::Data1, &args).map_err(|_| Error::AuthError)?;
-    Ok(())
 }

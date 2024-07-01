@@ -5,8 +5,6 @@ This is a simple funding lock script for ckb fiber network. It utilizes the [ckb
 The lock script args is a blake160 hash of the aggregated public key of the two parties, to unlock this lock, the transaction must provide following fields in the witness:
 
 - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
-- `version`: 8 bytes, u64 in little-endian
-- `funding_out_point`: 36 bytes, out point of the funding transaction
 - `pubkey`: 32 bytes, x only aggregated public key
 - `signature`: 64 bytes, aggregated signature
 
