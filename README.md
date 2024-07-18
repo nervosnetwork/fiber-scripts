@@ -1,6 +1,6 @@
-# CKB Fiber Network Scripts
+# Fiber Network Scripts
 
-This repository contains the scripts for the CKB Fiber Network.
+This repository contains the scripts for the Fiber Network.
 
 - [funding-lock](contracts/funding-lock/README.md)
 
