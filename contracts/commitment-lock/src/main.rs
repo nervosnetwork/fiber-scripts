@@ -18,7 +18,7 @@ use ckb_std::{
     ckb_types::{bytes::Bytes, core::ScriptHashType, prelude::*},
     error::SysError,
     high_level::{
-        exec_cell, load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type,
+        exec_cell, load_cell, load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type,
         load_input_since, load_script, load_tx_hash, load_witness,
     },
     since::Since,
@@ -43,6 +43,9 @@ pub enum Error {
     WitnessLenError,
     EmptyWitnessArgsError,
     WitnessHashError,
+    InvalidFundingTx,
+    InvalidRevocationVersion,
+    InvalidOutPoint,
     OutputCapacityError,
     OutputLockError,
     OutputTypeError,
@@ -72,14 +75,10 @@ pub fn program_entry() -> i8 {
 
 // a placeholder for empty witness args, to resolve the issue of xudt compatibility
 const EMPTY_WITNESS_ARGS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-// min witness script length: 8 (local_delay_epoch) + 20 (local_delay_pubkey_hash) + 20 (revocation_pubkey_hash) = 48
-const MIN_WITNESS_SCRIPT_LEN: usize = 48;
 // HTLC script length: 1 (htlc_type) + 16 (payment_amount) + 20 (payment_hash) + 20 (remote_htlc_pubkey_hash) + 20 (local_htlc_pubkey_hash) + 8 (htlc_expiry) = 85
 const HTLC_SCRIPT_LEN: usize = 85;
-// 1 (unlock_type) + 65 (signature) = 66
-const UNLOCK_WITH_SIGNATURE_LEN: usize = 66;
+const SIGNATURE_LEN: usize = 65;
 const PREIMAGE_LEN: usize = 32;
-const MIN_WITNESS_LEN: usize = MIN_WITNESS_SCRIPT_LEN + UNLOCK_WITH_SIGNATURE_LEN;
 
 enum HtlcType {
     Offered,
@@ -132,8 +131,7 @@ impl<'a> Htlc<'a> {
 }
 
 fn auth() -> Result<(), Error> {
-    // since local_delay_pubkey and revocation_pubkey are derived, the scripts are usually unique,
-    // to simplify the implementation of the following unlocking logic, we check the number of inputs should be 1
+    // since local_delay_pubkey is derived, the scripts are usually unique, to simplify the implementation of the following unlocking logic, we check the number of inputs should be 1
     if load_input_since(1, Source::GroupInput).is_ok() {
         return Err(Error::MultipleInputs);
     }
@@ -143,9 +141,10 @@ fn auth() -> Result<(), Error> {
 
     let script = load_script()?;
     let args: Bytes = script.args().unpack();
-    if args.len() != 20 {
+    if args.len() != 36 && args.len() != 56 {
         return Err(Error::ArgsLenError);
     }
+
     let mut witness = load_witness(0, Source::GroupInput)?;
     if witness
         .drain(0..EMPTY_WITNESS_ARGS.len())
@@ -154,60 +153,126 @@ fn auth() -> Result<(), Error> {
     {
         return Err(Error::EmptyWitnessArgsError);
     }
-    let witness_len = witness.len();
-    if witness_len < MIN_WITNESS_LEN {
-        return Err(Error::WitnessLenError);
-    }
-    let (pending_htlcs, preimage) = match witness_len {
-        MIN_WITNESS_LEN => (0, None),
-        _ => match (witness_len - MIN_WITNESS_LEN) % HTLC_SCRIPT_LEN {
-            0 => ((witness_len - MIN_WITNESS_LEN) / HTLC_SCRIPT_LEN, None),
-            PREIMAGE_LEN => (
-                (witness_len - PREIMAGE_LEN - MIN_WITNESS_LEN) / HTLC_SCRIPT_LEN,
-                Some(&witness[witness_len - PREIMAGE_LEN..]),
-            ),
-            _ => return Err(Error::WitnessLenError),
-        },
-    };
-
-    // verify the hash of the witness script part is equal to the script args
-    let witness_script_len = witness_len
-        - if preimage.is_some() {
-            UNLOCK_WITH_SIGNATURE_LEN + PREIMAGE_LEN
-        } else {
-            UNLOCK_WITH_SIGNATURE_LEN
-        };
-    if blake2b_256(&witness[0..witness_script_len])[0..20] != args[0..20] {
-        return Err(Error::WitnessHashError);
-    }
-
-    let unlock_type = witness[witness_script_len];
-    let signature = witness[witness_script_len + 1..witness_script_len + 66].to_vec();
-
-    let message = load_tx_hash()?;
-    let mut pubkey_hash = [0u8; 20];
-
+    let unlock_type = witness.remove(0);
     if unlock_type == 0xFF {
-        // unlock with revocation or local_delay pubkey
+        // revocation unlock process
+
+        // verify version
+        let current_version: [u8; 8] = args[28..36].try_into().unwrap();
+        let new_version: [u8; 8] = witness[0..8].try_into().unwrap();
+        if current_version > new_version {
+            return Err(Error::InvalidRevocationVersion);
+        }
+
+        // verify signature, we are using the same signature verification logic as open tx, only hash the 1st output
+        let output = load_cell(0, Source::Output)?;
+        let output_data = load_cell_data(0, Source::Output)?;
+        let message = blake2b_256(
+            [
+                output.as_slice(),
+                (output_data.len() as u32).to_le_bytes().as_ref(),
+                output_data.as_slice(),
+                &args[0..28],
+                new_version.as_ref(),
+            ]
+            .concat(),
+        );
+        let pubkey_hash = &args[0..20];
+
+        // AuthAlgorithmIdSchnorr = 7
+        let algorithm_id_str = CString::new(encode([7u8])).unwrap();
+        let signature_str = CString::new(encode(&witness[8..])).unwrap();
+        let message_str = CString::new(encode(message)).unwrap();
+        let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();
+
+        let args = [
+            algorithm_id_str.as_c_str(),
+            signature_str.as_c_str(),
+            message_str.as_c_str(),
+            pubkey_hash_str.as_c_str(),
+        ];
+
+        exec_cell(&AUTH_CODE_HASH, ScriptHashType::Data1, &args).map_err(|_| Error::AuthError)?;
+        return Ok(());
+    } else if unlock_type == 0xFE {
+        // non-pending HTLC unlock process
+
         let raw_since_value = load_input_since(0, Source::GroupInput)?;
-        if raw_since_value == 0 {
-            // when input since is 0, it means the unlock logic is for revocation, verify the revocation pubkey
-            pubkey_hash.copy_from_slice(&witness[28..48]);
+        let since = Since::new(raw_since_value);
+        let delay_epoch = Since::new(u64::from_le_bytes(args[20..28].try_into().unwrap()));
+        if since >= delay_epoch {
+            // verify signature, we are using the same signature verification logic as open tx, only hash the 1st and 2nd output
+            // TODO we may add a check to ensure the 3rd output cell's lock script is same as the 1st output cell's lock script, to resolve the issue of pending timeout HTLC
+            let to_local_output = load_cell(0, Source::Output)?;
+            let to_local_output_data = load_cell_data(0, Source::Output)?;
+            let to_remote_output = load_cell(1, Source::Output)?;
+            let to_remote_output_data = load_cell_data(1, Source::Output)?;
+            let message = blake2b_256(
+                [
+                    to_local_output.as_slice(),
+                    (to_local_output_data.len() as u32).to_le_bytes().as_ref(),
+                    to_local_output_data.as_slice(),
+                    to_remote_output.as_slice(),
+                    (to_remote_output_data.len() as u32).to_le_bytes().as_ref(),
+                    to_remote_output_data.as_slice(),
+                    &args[0..36],
+                ]
+                .concat(),
+            );
+            let pubkey_hash = &args[0..20];
+
+            // AuthAlgorithmIdSchnorr = 7
+            let algorithm_id_str = CString::new(encode([7u8])).unwrap();
+            let signature_str = CString::new(encode(&witness)).unwrap();
+            let message_str = CString::new(encode(message)).unwrap();
+            let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();
+
+            let args = [
+                algorithm_id_str.as_c_str(),
+                signature_str.as_c_str(),
+                message_str.as_c_str(),
+                pubkey_hash_str.as_c_str(),
+            ];
+
+            exec_cell(&AUTH_CODE_HASH, ScriptHashType::Data1, &args)
+                .map_err(|_| Error::AuthError)?;
+            return Ok(());
         } else {
-            // when input since is not 0, it means the unlock logic is for local_delay, verify the local_delay pubkey and delay
-            let since = Since::new(raw_since_value);
-            let local_delay_epoch =
-                Since::new(u64::from_le_bytes(witness[0..8].try_into().unwrap()));
-            if since >= local_delay_epoch {
-                pubkey_hash.copy_from_slice(&witness[8..28]);
-            } else {
-                return Err(Error::InvalidSince);
-            }
+            return Err(Error::InvalidSince);
         }
     } else {
+        // pending HTLC unlock process
+        // verify the unlock_htlc out of bound or not
+        let pending_htlc_count = witness[0] as usize;
         let unlock_htlc = unlock_type as usize;
-        if unlock_htlc >= pending_htlcs {
+        if unlock_htlc >= pending_htlc_count {
             return Err(Error::InvalidUnlockType);
+        }
+
+        let raw_since_value = load_input_since(0, Source::GroupInput)?;
+        let message = load_tx_hash()?;
+        let mut signature = [0u8; 65];
+        let mut pubkey_hash = [0u8; 20];
+
+        let witness_len = witness.len();
+        let pending_htlcs_len = 1 + pending_htlc_count * HTLC_SCRIPT_LEN;
+        // verify the hash of the pending htlcs part is equal to the script args
+        if blake2b_256(&witness[0..pending_htlcs_len])[0..20] != args[36..56] {
+            return Err(Error::WitnessHashError);
+        }
+        if raw_since_value == 0 {
+            let expected_witness_len = pending_htlcs_len + SIGNATURE_LEN + PREIMAGE_LEN;
+            if witness_len != expected_witness_len {
+                return Err(Error::WitnessLenError);
+            }
+            signature
+                .copy_from_slice(&witness[pending_htlcs_len..pending_htlcs_len + SIGNATURE_LEN]);
+        } else {
+            let expected_witness_len = pending_htlcs_len + SIGNATURE_LEN;
+            if witness_len != expected_witness_len {
+                return Err(Error::WitnessLenError);
+            }
+            signature.copy_from_slice(&witness[pending_htlcs_len..]);
         }
 
         let mut new_amount = if type_script.is_some() {
@@ -216,10 +281,11 @@ fn auth() -> Result<(), Error> {
         } else {
             load_cell_capacity(0, Source::GroupInput)? as u128
         };
-        let mut new_witness_script: Vec<&[u8]> = Vec::new();
-        new_witness_script.push(&witness[0..MIN_WITNESS_SCRIPT_LEN]);
+        let mut new_pending_htlcs: Vec<&[u8]> = Vec::new();
+        let new_pending_htlc_count = [(pending_htlc_count - 1) as u8];
+        new_pending_htlcs.push(&new_pending_htlc_count);
 
-        for (i, htlc_script) in witness[MIN_WITNESS_SCRIPT_LEN..witness_script_len]
+        for (i, htlc_script) in witness[1..pending_htlcs_len]
             .chunks(HTLC_SCRIPT_LEN)
             .enumerate()
         {
@@ -227,20 +293,17 @@ fn auth() -> Result<(), Error> {
             if unlock_htlc == i {
                 match htlc.htlc_type() {
                     HtlcType::Offered => {
-                        let raw_since_value = load_input_since(0, Source::GroupInput)?;
                         if raw_since_value == 0 {
                             // when input since is 0, it means the unlock logic is for remote_htlc pubkey and preimage
-                            if preimage
-                                .map(|p| match htlc.payment_hash_type() {
-                                    PaymentHashType::Blake2b => {
-                                        htlc.payment_hash() != &blake2b_256(p)[0..20]
-                                    }
-                                    PaymentHashType::Sha256 => {
-                                        htlc.payment_hash() != &Sha256::digest(p)[0..20]
-                                    }
-                                })
-                                .unwrap_or(true)
-                            {
+                            let preimage = &witness[pending_htlcs_len + SIGNATURE_LEN..];
+                            if match htlc.payment_hash_type() {
+                                PaymentHashType::Blake2b => {
+                                    htlc.payment_hash() != &blake2b_256(preimage)[0..20]
+                                }
+                                PaymentHashType::Sha256 => {
+                                    htlc.payment_hash() != &Sha256::digest(preimage)[0..20]
+                                }
+                            } {
                                 return Err(Error::PreimageError);
                             }
                             new_amount -= htlc.payment_amount();
@@ -257,20 +320,17 @@ fn auth() -> Result<(), Error> {
                         }
                     }
                     HtlcType::Received => {
-                        let raw_since_value = load_input_since(0, Source::GroupInput)?;
                         if raw_since_value == 0 {
                             // when input since is 0, it means the unlock logic is for local_htlc pubkey and preimage
-                            if preimage
-                                .map(|p| match htlc.payment_hash_type() {
-                                    PaymentHashType::Blake2b => {
-                                        htlc.payment_hash() != &blake2b_256(p)[0..20]
-                                    }
-                                    PaymentHashType::Sha256 => {
-                                        htlc.payment_hash() != &Sha256::digest(p)[0..20]
-                                    }
-                                })
-                                .unwrap_or(true)
-                            {
+                            let preimage = &witness[pending_htlcs_len + SIGNATURE_LEN..];
+                            if match htlc.payment_hash_type() {
+                                PaymentHashType::Blake2b => {
+                                    htlc.payment_hash() != &blake2b_256(preimage)[0..20]
+                                }
+                                PaymentHashType::Sha256 => {
+                                    htlc.payment_hash() != &Sha256::digest(preimage)[0..20]
+                                }
+                            } {
                                 return Err(Error::PreimageError);
                             }
                             pubkey_hash.copy_from_slice(htlc.local_htlc_pubkey_hash());
@@ -288,13 +348,22 @@ fn auth() -> Result<(), Error> {
                     }
                 }
             } else {
-                new_witness_script.push(htlc_script);
+                new_pending_htlcs.push(htlc_script);
             }
         }
 
         // verify the first output cell's lock script is correct
         let output_lock = load_cell_lock(0, Source::Output)?;
-        let expected_lock_args = blake2b_256(new_witness_script.concat())[0..20].pack();
+        let expected_lock_args = if new_pending_htlcs.len() == 1 {
+            args[0..36].pack()
+        } else {
+            [
+                &args[0..36],
+                blake2b_256(new_pending_htlcs.concat())[0..20].as_ref(),
+            ]
+            .concat()
+            .pack()
+        };
         if output_lock.code_hash() != script.code_hash()
             || output_lock.hash_type() != script.hash_type()
             || output_lock.args() != expected_lock_args
@@ -330,21 +399,21 @@ fn auth() -> Result<(), Error> {
                 }
             }
         }
+
+        // AuthAlgorithmIdCkb = 0
+        let algorithm_id_str = CString::new(encode([0u8])).unwrap();
+        let signature_str = CString::new(encode(signature)).unwrap();
+        let message_str = CString::new(encode(message)).unwrap();
+        let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();
+
+        let args = [
+            algorithm_id_str.as_c_str(),
+            signature_str.as_c_str(),
+            message_str.as_c_str(),
+            pubkey_hash_str.as_c_str(),
+        ];
+
+        exec_cell(&AUTH_CODE_HASH, ScriptHashType::Data1, &args).map_err(|_| Error::AuthError)?;
+        Ok(())
     }
-
-    // AuthAlgorithmIdCkb = 0
-    let algorithm_id_str = CString::new(encode([0u8])).unwrap();
-    let signature_str = CString::new(encode(signature)).unwrap();
-    let message_str = CString::new(encode(message)).unwrap();
-    let pubkey_hash_str = CString::new(encode(pubkey_hash)).unwrap();
-
-    let args = [
-        algorithm_id_str.as_c_str(),
-        signature_str.as_c_str(),
-        message_str.as_c_str(),
-        pubkey_hash_str.as_c_str(),
-    ];
-
-    exec_cell(&AUTH_CODE_HASH, ScriptHashType::Data1, &args).map_err(|_| Error::AuthError)?;
-    Ok(())
 }
