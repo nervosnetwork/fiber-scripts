@@ -55,6 +55,8 @@ pub enum Error {
     OutputUdtAmountError,
     PreimageError,
     AuthError,
+    // New error for congestion attack prevention
+    NotAllHtlcsExpired,
 }
 
 impl From<SysError> for Error {
@@ -273,6 +275,21 @@ fn auth() -> Result<(), Error> {
         }
 
         let raw_since_value = load_expiry_raw_since_value();
+        
+        // Congestion attack prevention: when claiming expired TLCs (raw_since_value != 0),
+        // verify that ALL pending HTLCs have expired to prevent an attacker from
+        // claiming their expired TLCs before the victim can claim TLCs with preimage.
+        // This is achieved by requiring the since value to be >= the maximum expiry
+        // time of all pending HTLCs.
+        if raw_since_value != 0 && pending_htlc_count > 0 {
+            let since = Since::new(raw_since_value);
+            let max_expiry = get_max_htlc_expiry(&witness[1..pending_htlcs_len]);
+            let max_htlc_expiry = Since::new(max_expiry);
+            if since < max_htlc_expiry {
+                return Err(Error::NotAllHtlcsExpired);
+            }
+        }
+        
         let delay_epoch = Since::new(u64::from_le_bytes(args[20..28].try_into().unwrap()));
         let message = {
             let tx = load_transaction()?
@@ -557,6 +574,21 @@ fn load_expiry_raw_since_value() -> u64 {
             matches!(since.extract_lock_value(), Some(LockValue::Timestamp(_)) if since.is_absolute())
         })
         .unwrap_or_default()
+}
+
+// Get the maximum expiry time from all pending HTLCs
+// This is used to prevent congestion attacks where an attacker can claim expired TLCs
+// before the victim can claim their TLCs with preimage
+fn get_max_htlc_expiry(pending_htlcs: &[u8]) -> u64 {
+    let mut max_expiry: u64 = 0;
+    for htlc_script in pending_htlcs.chunks(HTLC_SCRIPT_LEN) {
+        let htlc = Htlc(htlc_script);
+        let expiry = htlc.htlc_expiry();
+        if expiry > max_expiry {
+            max_expiry = expiry;
+        }
+    }
+    max_expiry
 }
 
 // Calculate the product of delay_epoch and a fraction

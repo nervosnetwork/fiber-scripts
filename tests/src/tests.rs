@@ -649,7 +649,8 @@ fn test_commitment_lock_with_two_pending_htlcs() {
     assert!(error.to_string().contains("#22")); // PreimageError
 
     // build transaction with local_htlc_pubkey unlock offered pending htlc 1
-    let since = Since::from_timestamp(1711976400 + 1000, true).unwrap();
+    // Note: To prevent congestion attacks, the since value must be >= max expiry of all pending HTLCs
+    let since = Since::from_timestamp(1712062800 + 1000, true).unwrap(); // must be >= expiry2
 
     let input = CellInput::new_builder()
         .previous_output(input_out_point.clone())
@@ -742,7 +743,7 @@ fn test_commitment_lock_with_two_pending_htlcs() {
         .verify_tx(&fail_tx, MAX_CYCLES)
         .expect_err("none-expired since should fail");
     println!("error: {}", error);
-    assert!(error.to_string().contains("#11")); // InvalidExpiry
+    assert!(error.to_string().contains("#24")); // NotAllHtlcsExpired (was InvalidExpiry, now fails earlier due to congestion attack prevention)
 
     // build transaction with remote_htlc_pubkey2 unlock received pending htlc 2
     let since = Since::from_timestamp(1712062800 + 1000, true).unwrap();
@@ -1290,7 +1291,8 @@ fn test_commitment_lock_with_two_pending_htlcs_and_sudt() {
     assert!(err.to_string().contains("#22")); // PreimageError
 
     // build transaction with local_htlc_pubkey unlock offered pending htlc 1
-    let since = Since::from_timestamp(1711976400 + 1000, true).unwrap();
+    // Note: To prevent congestion attacks, the since value must be >= max expiry of all pending HTLCs
+    let since = Since::from_timestamp(1712062800 + 1000, true).unwrap(); // must be >= expiry2
 
     let input = CellInput::new_builder()
         .previous_output(input_out_point.clone())
@@ -1479,4 +1481,338 @@ fn test_commitment_lock_with_two_pending_htlcs_and_sudt() {
         .verify_tx(&fail_tx, MAX_CYCLES)
         .expect_err("empty preimage should fail");
     assert!(err.to_string().contains("#22")); // PreimageError
+}
+
+/// Test for congestion attack prevention
+/// 
+/// This test verifies that when trying to claim an expired HTLC without preimage,
+/// the transaction fails if not all pending HTLCs have expired. This prevents
+/// a congestion attack where an attacker (Alice) could:
+/// 1. Send a TLC A to Bob (Bob knows the preimage)
+/// 2. Flood with many TLCs that expire soon
+/// 3. Shutdown the channel
+/// 4. Claim expired TLCs before Bob can claim TLC A with preimage
+/// 
+/// The fix requires proving that ALL pending HTLCs have expired before claiming
+/// any expired HTLC without preimage.
+#[test]
+fn test_congestion_attack_prevention() {
+    // deploy contract
+    let mut context = Context::default();
+    let loader = Loader::default();
+    let commitment_lock_bin = loader.load_binary("commitment-lock");
+    let auth_bin = loader.load_binary("../../deps/auth");
+    let commitment_lock_out_point = context.deploy_cell(commitment_lock_bin);
+    let auth_out_point = context.deploy_cell(auth_bin);
+    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
+
+    // prepare script
+    let (_sec_key_1, _sec_key_2, key_agg_ctx) = generate_multisig_keys();
+    let aggregated_pubkey: PublicKey = key_agg_ctx.aggregated_pubkey();
+    let x_only_pubkey = aggregated_pubkey.x_only_public_key().0.serialize();
+    let pubkey_hash = blake2b_256(x_only_pubkey);
+    let delay_epoch = Since::from_epoch(EpochNumberWithFraction::new(10, 1, 2), false);
+    let commitment_tx_version = 42u64;
+
+    let mut generator = Generator::new();
+    let remote_settlement_key = generator.gen_keypair();
+    let remote_amount = (400 * BYTE_SHANNONS) as u128;
+    let local_settlement_key = generator.gen_keypair();
+    let local_amount = (600 * BYTE_SHANNONS) as u128;
+
+    // Set up two HTLCs with different expiry times:
+    // - HTLC 1 (Alice's attack TLC): expires early at timestamp 1711976400
+    // - HTLC 2 (Bob's TLC A): expires later at timestamp 1712062800
+    let remote_htlc_key1 = generator.gen_keypair();
+    let remote_htlc_key2 = generator.gen_keypair();
+    let local_htlc_key1 = generator.gen_keypair();
+    let local_htlc_key2 = generator.gen_keypair();
+    let preimage1 = [42u8; 32];
+    let preimage2 = [24u8; 32]; // Bob knows this preimage
+    let payment_amount1 = 5 * BYTE_SHANNONS as u128;
+    let payment_amount2 = 8 * BYTE_SHANNONS as u128;
+    // HTLC 1 expires at 2024-04-01 01:00:00 (early expiry - attack TLCs)
+    let expiry1 = Since::from_timestamp(1711976400, true).unwrap();
+    // HTLC 2 expires at 2024-04-02 01:00:00 (later expiry - Bob's TLC)
+    let expiry2 = Since::from_timestamp(1712062800, true).unwrap();
+
+    // Offered HTLC (type 0): Alice offered to Bob, Bob can claim with preimage
+    // Received HTLC (type 1): Bob received from Alice, Alice can claim after expiry
+    let pending_htlcs = [
+        [2].to_vec(),
+        [0b00000000].to_vec(), // HTLC 1: offered type, blake2b hash
+        payment_amount1.to_le_bytes().to_vec(),
+        blake2b_256(preimage1)[0..20].to_vec(),
+        blake2b_256(remote_htlc_key1.1.serialize())[0..20].to_vec(),
+        blake2b_256(local_htlc_key1.1.serialize())[0..20].to_vec(),
+        expiry1.as_u64().to_le_bytes().to_vec(),
+        [0b00000000].to_vec(), // HTLC 2: offered type, blake2b hash
+        payment_amount2.to_le_bytes().to_vec(),
+        blake2b_256(preimage2)[0..20].to_vec(),
+        blake2b_256(remote_htlc_key2.1.serialize())[0..20].to_vec(),
+        blake2b_256(local_htlc_key2.1.serialize())[0..20].to_vec(),
+        expiry2.as_u64().to_le_bytes().to_vec(),
+    ]
+    .concat();
+
+    let two_party_settlement = [
+        blake2b_256(remote_settlement_key.1.serialize())[0..20].to_vec(),
+        remote_amount.to_le_bytes().to_vec(),
+        blake2b_256(local_settlement_key.1.serialize())[0..20].to_vec(),
+        local_amount.to_le_bytes().to_vec(),
+    ]
+    .concat();
+
+    let settlement_script = [pending_htlcs.clone(), two_party_settlement.clone()].concat();
+
+    let args = [
+        &pubkey_hash[0..20],
+        delay_epoch.as_u64().to_le_bytes().as_slice(),
+        commitment_tx_version.to_be_bytes().as_slice(),
+        &blake2b_256(&settlement_script)[0..20],
+        &[0x00],
+    ]
+    .concat();
+
+    let lock_script = context
+        .build_script(&commitment_lock_out_point, args.clone().into())
+        .expect("script");
+    let always_success_script = context
+        .build_script(&always_success_out_point, Bytes::new())
+        .expect("script");
+
+    // prepare cell deps
+    let commitment_lock_dep = CellDep::new_builder()
+        .out_point(commitment_lock_out_point)
+        .build();
+    let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
+    let always_success_dep = CellDep::new_builder()
+        .out_point(always_success_out_point)
+        .build();
+    let cell_deps = vec![commitment_lock_dep, auth_dep, always_success_dep].pack();
+
+    // prepare cells
+    let input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(
+                ((local_amount + remote_amount + payment_amount1 + payment_amount2) as u64).pack(),
+            )
+            .lock(lock_script.clone())
+            .build(),
+        Bytes::new(),
+    );
+    let delay_input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .lock(always_success_script)
+            .build(),
+        Bytes::new(),
+    );
+
+    // =====================================================
+    // Test Case 1: CONGESTION ATTACK PREVENTION
+    // Alice tries to claim HTLC 1 (expired) via expiry before HTLC 2 expires
+    // This should FAIL because not all HTLCs have expired
+    // =====================================================
+    
+    // Use a since value that is after HTLC 1's expiry but before HTLC 2's expiry
+    let attack_since = Since::from_timestamp(1711976400 + 1000, true).unwrap();
+    
+    let new_pending_htlcs = [
+        [1].to_vec(),
+        [0b00000000].to_vec(),
+        payment_amount2.to_le_bytes().to_vec(),
+        blake2b_256(preimage2)[0..20].to_vec(),
+        blake2b_256(remote_htlc_key2.1.serialize())[0..20].to_vec(),
+        blake2b_256(local_htlc_key2.1.serialize())[0..20].to_vec(),
+        expiry2.as_u64().to_le_bytes().to_vec(),
+    ]
+    .concat();
+    let new_settlement_script = [new_pending_htlcs.clone(), two_party_settlement.clone()].concat();
+    let new_args = [
+        &pubkey_hash[0..20],
+        delay_epoch.as_u64().to_le_bytes().as_slice(),
+        commitment_tx_version.to_be_bytes().as_slice(),
+        &blake2b_256(&new_settlement_script)[0..20],
+        &[0x01],
+    ]
+    .concat();
+    let new_lock_script = lock_script
+        .clone()
+        .as_builder()
+        .args(new_args.pack())
+        .build();
+    
+    let input = CellInput::new_builder()
+        .previous_output(input_out_point.clone())
+        .since(delay_epoch.as_u64().pack())
+        .build();
+    let delay_epoch_input = CellInput::new_builder()
+        .previous_output(delay_input_out_point.clone())
+        .since(attack_since.as_u64().pack())
+        .build();
+    let inputs = vec![input.clone(), delay_epoch_input.clone()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(((local_amount + remote_amount + payment_amount2) as u64).pack())
+            .lock(new_lock_script.clone())
+            .build(),
+    ];
+    let outputs_data = [Bytes::new()];
+    
+    let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .inputs(inputs)
+        .outputs(outputs.clone())
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // Alice signs with local_htlc_key1 (her key for expiry unlock)
+    let message: [u8; 32] = compute_tx_message(&tx);
+    let signature = local_htlc_key1
+        .0
+        .sign_recoverable(&message.into())
+        .unwrap()
+        .serialize();
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        vec![0x01],
+        settlement_script.clone(),
+        [0x00, 0x00].to_vec(), // unlock with local_htlc_key1 and no preimage (expiry unlock)
+        signature.clone(),
+    ]
+    .concat();
+
+    let attack_tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    
+    // This should FAIL with NotAllHtlcsExpired error
+    let error = context
+        .verify_tx(&attack_tx, MAX_CYCLES)
+        .expect_err("congestion attack should fail - not all HTLCs expired");
+    println!("Congestion attack prevented: {}", error);
+    assert!(error.to_string().contains("#24")); // NotAllHtlcsExpired
+    
+    // =====================================================
+    // Test Case 2: Bob can still claim HTLC 2 with preimage (immediate)
+    // This should SUCCEED because preimage unlocks don't require all HTLCs to be expired
+    // =====================================================
+    
+    // Build transaction for Bob to claim HTLC 2 with preimage
+    let input_bob = CellInput::new_builder()
+        .previous_output(input_out_point.clone())
+        .since(delay_epoch.as_u64().pack())
+        .build();
+    let inputs = vec![input_bob.clone()];
+    
+    let new_pending_htlcs_bob = [
+        [1].to_vec(),
+        [0b00000000].to_vec(),
+        payment_amount1.to_le_bytes().to_vec(),
+        blake2b_256(preimage1)[0..20].to_vec(),
+        blake2b_256(remote_htlc_key1.1.serialize())[0..20].to_vec(),
+        blake2b_256(local_htlc_key1.1.serialize())[0..20].to_vec(),
+        expiry1.as_u64().to_le_bytes().to_vec(),
+    ]
+    .concat();
+    let new_settlement_script_bob = [new_pending_htlcs_bob.clone(), two_party_settlement.clone()].concat();
+    let new_args_bob = [
+        &pubkey_hash[0..20],
+        delay_epoch.as_u64().to_le_bytes().as_slice(),
+        commitment_tx_version.to_be_bytes().as_slice(),
+        &blake2b_256(&new_settlement_script_bob)[0..20],
+        &[0x01],
+    ]
+    .concat();
+    let new_lock_script_bob = lock_script
+        .clone()
+        .as_builder()
+        .args(new_args_bob.pack())
+        .build();
+    
+    let outputs_bob = vec![
+        CellOutput::new_builder()
+            .capacity(((local_amount + remote_amount + payment_amount1) as u64).pack())
+            .lock(new_lock_script_bob.clone())
+            .build(),
+    ];
+    
+    let tx_bob = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .inputs(inputs)
+        .outputs(outputs_bob)
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // Bob signs with remote_htlc_key2 (his key for preimage unlock)
+    let message_bob: [u8; 32] = compute_tx_message(&tx_bob);
+    let signature_bob = remote_htlc_key2
+        .0
+        .sign_recoverable(&message_bob.into())
+        .unwrap()
+        .serialize();
+    let witness_bob = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        vec![0x01],
+        settlement_script.clone(),
+        [0x01, 0x01].to_vec(), // unlock with remote_htlc_key2 and preimage
+        signature_bob.clone(),
+        preimage2.to_vec(),
+    ]
+    .concat();
+
+    let bob_tx = tx_bob.as_advanced_builder().witness(witness_bob.pack()).build();
+    
+    // This should SUCCEED - Bob can claim with preimage regardless of other HTLCs
+    let cycles = context
+        .verify_tx(&bob_tx, MAX_CYCLES)
+        .expect("Bob should be able to claim with preimage");
+    println!("Bob successfully claimed HTLC with preimage, cycles: {}", cycles);
+    
+    // =====================================================
+    // Test Case 3: Alice can claim HTLC 1 via expiry after ALL HTLCs have expired
+    // This should SUCCEED because now all HTLCs have expired
+    // =====================================================
+    
+    // Use a since value that is after BOTH HTLCs' expiry times
+    let valid_since = Since::from_timestamp(1712062800 + 1000, true).unwrap();
+    
+    let delay_epoch_input_valid = CellInput::new_builder()
+        .previous_output(delay_input_out_point.clone())
+        .since(valid_since.as_u64().pack())
+        .build();
+    let input_valid = CellInput::new_builder()
+        .previous_output(input_out_point.clone())
+        .since(delay_epoch.as_u64().pack())
+        .build();
+    let inputs_valid = vec![input_valid, delay_epoch_input_valid];
+    
+    let tx_valid = TransactionBuilder::default()
+        .cell_deps(cell_deps.clone())
+        .inputs(inputs_valid)
+        .outputs(outputs)
+        .outputs_data(outputs_data.pack())
+        .build();
+
+    // Alice signs with local_htlc_key1 
+    let message_valid: [u8; 32] = compute_tx_message(&tx_valid);
+    let signature_valid = local_htlc_key1
+        .0
+        .sign_recoverable(&message_valid.into())
+        .unwrap()
+        .serialize();
+    let witness_valid = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        vec![0x01],
+        settlement_script.clone(),
+        [0x00, 0x00].to_vec(), // unlock with local_htlc_key1 and no preimage (expiry unlock)
+        signature_valid.clone(),
+    ]
+    .concat();
+
+    let valid_tx = tx_valid.as_advanced_builder().witness(witness_valid.pack()).build();
+    
+    // This should SUCCEED - all HTLCs have expired
+    let cycles = context
+        .verify_tx(&valid_tx, MAX_CYCLES)
+        .expect("Should succeed when all HTLCs have expired");
+    println!("Successfully claimed expired HTLC when all HTLCs expired, cycles: {}", cycles);
 }

@@ -101,6 +101,24 @@ The verification logic ensures that:
 - The new args match the expected format with updated settlement_hash
 - Output capacity/UDT amount reflects the settled amounts correctly
 
+## Congestion Attack Prevention
+
+This contract includes protection against congestion attacks. A congestion attack works as follows:
+
+1. Alice sends a TLC A to Bob (Bob knows the preimage)
+2. Alice sends many TLCs that are going to expire soon
+3. Alice shuts down the channel
+4. Bob needs to use the preimage to settle TLC A, but Alice can create settlement transactions to claim the expired TLCs first
+
+Without protection, Alice could flood Bob with many soon-to-expire TLCs and then close the channel. This forces Bob to compete with Alice to settle TLC A with his preimage, while Alice races to claim all her expired TLCs.
+
+### Solution
+
+The contract requires proving that **all pending HTLCs have expired** before claiming any expired HTLC without preimage. This is enforced by checking that the `since` value (absolute timestamp) is greater than or equal to the maximum expiry time of all pending HTLCs.
+
+- **Preimage-based unlocks** (with_preimage = 1): Can be executed at any time (after the delay epoch) and are not affected by this check. This ensures Bob can always claim TLCs for which he knows the preimage.
+- **Expiry-based unlocks** (with_preimage = 0): Require that all pending HTLCs have expired. This prevents Alice from claiming her expired TLCs before Bob has a chance to claim TLCs with preimage.
+
 To know more about the transaction building process, please refer to the `test_commitment_lock_*` unit test.
 
 *This contract was bootstrapped with [ckb-script-templates].*
