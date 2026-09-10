@@ -504,20 +504,26 @@ fn auth() -> Result<(), Error> {
         // verify the first output cell's lock script and capacity are correct
         if new_amount > 0 && !two_parties_all_settled {
             let output_lock = load_cell_lock(0, Source::Output)?;
+            // propagate the layout version into the derived cell: v1 cells
+            // (58-byte args) keep their features byte at [57], legacy cells
+            // stay at 57 bytes; otherwise a v1 partial settlement would
+            // produce a 57-byte derived cell and brick the remaining v1
+            // pending HTLCs
+            let features_byte: &[u8] = if args.len() == 58 { &args[57..58] } else { &[] };
             let expected_lock_args = [
                 &args[0..36],
                 blake2b_256(new_settlement_script.concat())[0..20].as_ref(),
                 &[0x01], // 0x01 means new cell is created for subsequent commitment cell unlock
+                features_byte,
             ]
             .concat()
             .pack();
-            if output_lock.code_hash() != script.code_hash() {
-                return Err(Error::Encoding);
-            }
-            if output_lock.hash_type() != script.hash_type() {
-                return Err(Error::ItemMissing);
-            }
-            if output_lock.args() != expected_lock_args {
+            // keep the original combined check so legacy failure codes stay
+            // identical (OutputLockError)
+            if output_lock.code_hash() != script.code_hash()
+                || output_lock.hash_type() != script.hash_type()
+                || output_lock.args() != expected_lock_args
+            {
                 return Err(Error::OutputLockError);
             }
 
