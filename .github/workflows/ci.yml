@@ -22,6 +22,12 @@ jobs:
         version: "16"
     - name: Prepare
       run: make prepare
+    - name: Install Rust components
+      run: rustup component add rustfmt clippy
+    - name: Format
+      run: make fmt-check
+    - name: Clippy
+      run: make clippy CARGO_ARGS="--all-targets"
     - name: Build
       run: scripts/reproducible_build_docker
     - name: Run tests

@@ -19,6 +19,11 @@ if [[ -n "${BREW_PREFIX}" ]]; then
 fi
 
 for candidate in ${CANDIDATES[@]}; do
+  VERSION_TEXT=$($candidate --version 2> /dev/null)
+  if echo "${VERSION_TEXT}" | grep -qi "Apple clang"; then
+    continue
+  fi
+
   OUTPUT=$($candidate -dumpversion 2> /dev/null | cut -d'.' -f 1)
 
   if [[ $((OUTPUT)) -ge 16 ]]; then

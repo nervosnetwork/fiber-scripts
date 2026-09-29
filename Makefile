@@ -80,6 +80,14 @@ clippy:
 fmt:
 	cargo fmt $(CARGO_ARGS)
 
+fmt-check:
+	cargo fmt --check $(CARGO_ARGS)
+
+pr-verify: fmt-check
+	$(MAKE) clippy CARGO_ARGS="--all-targets"
+	$(MAKE) build
+	$(MAKE) test
+
 # Arbitrary cargo command is supported here. For example:
 #
 # make cargo CARGO_CMD=expand CARGO_ARGS="--ugly"
@@ -150,4 +158,4 @@ CHECKSUM_FILE := build/checksums-$(MODE).txt
 checksum: build
 	shasum -a 256 build/$(MODE)/* > $(CHECKSUM_FILE)
 
-.PHONY: build test check clippy fmt cargo clean prepare checksum
+.PHONY: build test check clippy fmt fmt-check pr-verify cargo clean prepare checksum

@@ -110,6 +110,123 @@ fn compute_tx_message(tx: &TransactionView) -> [u8; 32] {
     blake2b_256(tx.as_slice())
 }
 
+fn assert_script_error_code(
+    context: &Context,
+    tx: &TransactionView,
+    expected_error_code: i8,
+    case_name: &str,
+) {
+    let error = context
+        .verify_tx(tx, MAX_CYCLES)
+        .expect_err(&format!("{case_name} should fail"));
+    let error_message = error.to_string();
+    assert!(
+        error_message.contains(&format!("#{expected_error_code}")),
+        "{case_name} failed with unexpected error: {error_message}"
+    );
+}
+
+struct FundingLockFixture {
+    context: Context,
+    cell_deps: CellDepVec,
+    lock_script: Script,
+    sec_key_1: SecretKey,
+    sec_key_2: SecretKey,
+    key_agg_ctx: KeyAggContext,
+    x_only_pubkey: [u8; 32],
+}
+
+fn setup_funding_lock() -> FundingLockFixture {
+    let mut context = Context::default();
+    let loader = Loader::default();
+    let funding_lock_bin = loader.load_binary("funding-lock");
+    let auth_bin = loader.load_binary("../../deps/auth");
+    let funding_lock_out_point = context.deploy_cell(funding_lock_bin);
+    let auth_out_point = context.deploy_cell(auth_bin);
+
+    let (sec_key_1, sec_key_2, key_agg_ctx) = generate_multisig_keys();
+    let aggregated_pubkey: PublicKey = key_agg_ctx.aggregated_pubkey();
+    let x_only_pubkey = aggregated_pubkey.x_only_public_key().0.serialize();
+    let pubkey_hash = blake2b_256(x_only_pubkey);
+    let lock_script = context
+        .build_script(&funding_lock_out_point, pubkey_hash[0..20].to_vec().into())
+        .expect("script");
+
+    let funding_lock_dep = CellDep::new_builder()
+        .out_point(funding_lock_out_point)
+        .build();
+    let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
+    let cell_deps = vec![funding_lock_dep, auth_dep].pack();
+
+    FundingLockFixture {
+        context,
+        cell_deps,
+        lock_script,
+        sec_key_1,
+        sec_key_2,
+        key_agg_ctx,
+        x_only_pubkey,
+    }
+}
+
+fn build_funding_tx(
+    context: &mut Context,
+    lock_script: &Script,
+    cell_deps: CellDepVec,
+    input_count: usize,
+) -> TransactionView {
+    let inputs = (0..input_count)
+        .map(|_| {
+            let input_out_point = context.create_cell(
+                CellOutput::new_builder()
+                    .capacity(1000u64.pack())
+                    .lock(lock_script.clone())
+                    .build(),
+                Bytes::new(),
+            );
+            CellInput::new_builder()
+                .previous_output(input_out_point)
+                .build()
+        })
+        .collect::<Vec<_>>();
+
+    let output_lock = Script::new_builder()
+        .args(Bytes::from("output_lock").pack())
+        .build();
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity((1000u64 * input_count as u64).pack())
+            .lock(output_lock)
+            .build(),
+    ];
+    let outputs_data = [Bytes::new()];
+
+    TransactionBuilder::default()
+        .cell_deps(cell_deps)
+        .inputs(inputs)
+        .outputs(outputs)
+        .outputs_data(outputs_data.pack())
+        .build()
+}
+
+fn sign_funding_tx(tx: TransactionView, fixture: &FundingLockFixture) -> TransactionView {
+    let message = compute_tx_message(&tx);
+    let signature = multisig(
+        fixture.sec_key_1,
+        fixture.sec_key_2,
+        fixture.key_agg_ctx.clone(),
+        message,
+    );
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        fixture.x_only_pubkey.to_vec(),
+        signature,
+    ]
+    .concat();
+
+    tx.as_advanced_builder().witness(witness.pack()).build()
+}
+
 #[test]
 fn test_funding_lock() {
     // deploy contract
@@ -196,6 +313,77 @@ fn test_funding_lock() {
 }
 
 #[test]
+fn test_funding_lock_rejects_multiple_group_inputs() {
+    let mut fixture = setup_funding_lock();
+    let tx = build_funding_tx(
+        &mut fixture.context,
+        &fixture.lock_script,
+        fixture.cell_deps.clone(),
+        2,
+    );
+    let tx = sign_funding_tx(tx, &fixture);
+
+    assert_script_error_code(&fixture.context, &tx, 5, "funding lock multiple inputs");
+}
+
+#[test]
+fn test_funding_lock_rejects_malformed_witness_prefix() {
+    let mut fixture = setup_funding_lock();
+    let tx = build_funding_tx(
+        &mut fixture.context,
+        &fixture.lock_script,
+        fixture.cell_deps.clone(),
+        1,
+    );
+    let message = compute_tx_message(&tx);
+    let signature = multisig(
+        fixture.sec_key_1,
+        fixture.sec_key_2,
+        fixture.key_agg_ctx.clone(),
+        message,
+    );
+    let mut empty_witness_args = EMPTY_WITNESS_ARGS.to_vec();
+    empty_witness_args[0] = 0;
+    let witness = [
+        empty_witness_args,
+        fixture.x_only_pubkey.to_vec(),
+        signature,
+    ]
+    .concat();
+    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+
+    assert_script_error_code(
+        &fixture.context,
+        &tx,
+        7,
+        "funding lock malformed witness args",
+    );
+}
+
+#[test]
+fn test_funding_lock_rejects_wrong_signature() {
+    let mut fixture = setup_funding_lock();
+    let tx = build_funding_tx(
+        &mut fixture.context,
+        &fixture.lock_script,
+        fixture.cell_deps.clone(),
+        1,
+    );
+    let (wrong_sec_key_1, wrong_sec_key_2, wrong_key_agg_ctx) = generate_multisig_keys();
+    let message = compute_tx_message(&tx);
+    let signature = multisig(wrong_sec_key_1, wrong_sec_key_2, wrong_key_agg_ctx, message);
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        fixture.x_only_pubkey.to_vec(),
+        signature,
+    ]
+    .concat();
+    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+
+    assert_script_error_code(&fixture.context, &tx, 110, "funding lock wrong signature");
+}
+
+#[test]
 fn test_commitment_lock_no_pending_htlcs() {
     // deploy contract
     let mut context = Context::default();
@@ -277,7 +465,7 @@ fn test_commitment_lock_no_pending_htlcs() {
         .previous_output(input_out_point.clone())
         .build();
 
-    let tx = TransactionBuilder::default()
+    let unsigned_revocation_tx = TransactionBuilder::default()
         .cell_deps(cell_deps.clone())
         .input(input)
         .outputs(outputs)
@@ -307,7 +495,11 @@ fn test_commitment_lock_no_pending_htlcs() {
     ]
     .concat();
 
-    let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+    let tx = unsigned_revocation_tx
+        .clone()
+        .as_advanced_builder()
+        .witness(witness.pack())
+        .build();
     println!("tx: {:?}", tx);
 
     // run
@@ -315,6 +507,26 @@ fn test_commitment_lock_no_pending_htlcs() {
         .verify_tx(&tx, MAX_CYCLES)
         .expect("pass verification");
     println!("consume cycles: {}", cycles);
+
+    let stale_version = commitment_tx_version - 1;
+    let witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        vec![0x00],
+        stale_version.to_be_bytes().to_vec(),
+        x_only_pubkey.to_vec(),
+        vec![0u8; 64],
+    ]
+    .concat();
+    let stale_revocation_tx = unsigned_revocation_tx
+        .as_advanced_builder()
+        .witness(witness.pack())
+        .build();
+    assert_script_error_code(
+        &context,
+        &stale_revocation_tx,
+        17,
+        "commitment lock stale revocation version",
+    );
 
     // test with settlement unlock logic (local settlement key)
     let new_settlement_script = [
