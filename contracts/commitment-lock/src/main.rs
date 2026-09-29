@@ -79,10 +79,46 @@ pub fn program_entry() -> i8 {
 
 // a placeholder for empty witness args, to resolve the issue of xudt compatibility
 const EMPTY_WITNESS_ARGS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-// HTLC script length: 1 (htlc_type) + 16 (payment_amount) + 20 (payment_hash) + 20 (remote_htlc_pubkey_hash) + 20 (local_htlc_pubkey_hash) + 8 (htlc_expiry) = 85
-const HTLC_SCRIPT_LEN: usize = 85;
+// HTLC script length: 1 (htlc_type) + 16 (payment_amount) + payment_hash + 20
+// (remote_htlc_pubkey_hash) + 20 (local_htlc_pubkey_hash) + 8 (htlc_expiry)
 const SIGNATURE_LEN: usize = 65;
 const PREIMAGE_LEN: usize = 32;
+
+// feature bitmap bit0: full 32-byte payment hash committed on-chain
+const FEATURE_ONCHAIN_FULL_PAYMENT_HASH: u8 = 0b0000_0001;
+
+#[derive(Copy, Clone)]
+struct HtlcLayout {
+    htlc_script_len: usize,
+    payment_hash_len: usize,
+}
+
+const HTLC_LAYOUT_LEGACY: HtlcLayout = HtlcLayout {
+    htlc_script_len: 85,
+    payment_hash_len: 20,
+};
+
+const HTLC_LAYOUT_V1: HtlcLayout = HtlcLayout {
+    htlc_script_len: 97, // 1 (htlc_type) + 16 (payment_amount) + 32 (payment_hash)
+    // + 20 (remote_htlc_pubkey_hash) + 20 (local_htlc_pubkey_hash) + 8 (htlc_expiry)
+    payment_hash_len: 32,
+};
+
+fn resolve_htlc_layout(args: &[u8]) -> Result<HtlcLayout, Error> {
+    match args.len() {
+        57 => Ok(HTLC_LAYOUT_LEGACY),
+        58 if args[57] == FEATURE_ONCHAIN_FULL_PAYMENT_HASH => Ok(HTLC_LAYOUT_V1),
+        _ => Err(Error::ArgsLenError),
+    }
+}
+
+fn preimage_matches(hash_type: PaymentHashType, committed_hash: &[u8], preimage: &[u8]) -> bool {
+    let digest = match hash_type {
+        PaymentHashType::Blake2b => blake2b_256(preimage),
+        PaymentHashType::Sha256 => Sha256::digest(preimage).into(),
+    };
+    committed_hash == &digest[..committed_hash.len()]
+}
 
 enum HtlcType {
     Offered,
@@ -94,11 +130,21 @@ enum PaymentHashType {
     Sha256,
 }
 
-struct Htlc<'a>(&'a [u8]);
+struct Htlc<'a> {
+    data: &'a [u8],
+    payment_hash_len: usize,
+}
 
 impl<'a> Htlc<'a> {
+    fn new(data: &'a [u8], layout: HtlcLayout) -> Self {
+        Self {
+            data,
+            payment_hash_len: layout.payment_hash_len,
+        }
+    }
+
     fn htlc_type(&self) -> HtlcType {
-        if self.0[0] & 0b00000001 == 0 {
+        if self.data[0] & 0b00000001 == 0 {
             HtlcType::Offered
         } else {
             HtlcType::Received
@@ -106,7 +152,7 @@ impl<'a> Htlc<'a> {
     }
 
     fn payment_hash_type(&self) -> PaymentHashType {
-        if (self.0[0] >> 1) & 0b0000001 == 0 {
+        if (self.data[0] >> 1) & 0b0000001 == 0 {
             PaymentHashType::Blake2b
         } else {
             PaymentHashType::Sha256
@@ -114,23 +160,26 @@ impl<'a> Htlc<'a> {
     }
 
     fn payment_amount(&self) -> u128 {
-        u128::from_le_bytes(self.0[1..17].try_into().unwrap())
+        u128::from_le_bytes(self.data[1..17].try_into().unwrap())
     }
 
     fn payment_hash(&self) -> &'a [u8] {
-        &self.0[17..37]
+        &self.data[17..17 + self.payment_hash_len]
     }
 
     fn remote_htlc_pubkey_hash(&self) -> [u8; 20] {
-        self.0[37..57].try_into().unwrap()
+        let off = 17 + self.payment_hash_len;
+        self.data[off..off + 20].try_into().unwrap()
     }
 
     fn local_htlc_pubkey_hash(&self) -> [u8; 20] {
-        self.0[57..77].try_into().unwrap()
+        let off = 17 + self.payment_hash_len + 20;
+        self.data[off..off + 20].try_into().unwrap()
     }
 
     fn htlc_expiry(&self) -> u64 {
-        u64::from_le_bytes(self.0[77..85].try_into().unwrap())
+        let off = 17 + self.payment_hash_len + 40;
+        u64::from_le_bytes(self.data[off..off + 8].try_into().unwrap())
     }
 }
 
@@ -169,9 +218,7 @@ fn auth() -> Result<(), Error> {
 
     let script = load_script()?;
     let args: Bytes = script.args().unpack();
-    if args.len() != 57 {
-        return Err(Error::ArgsLenError);
-    }
+    let layout = resolve_htlc_layout(args.as_ref())?;
     let is_first_settlement = args[56] == 0x00;
 
     let mut witness = load_witness(0, Source::GroupInput)?;
@@ -231,8 +278,8 @@ fn auth() -> Result<(), Error> {
     } else {
         // settlement unlock process
         let pending_htlc_count = witness[0] as usize;
-        // 1 (pending_htlc_count) + pending_htlc_count * HTLC_SCRIPT_LEN
-        let pending_htlcs_len = 1 + pending_htlc_count * HTLC_SCRIPT_LEN;
+        // 1 (pending_htlc_count) + pending_htlc_count * HtlcLayout::htlc_script_len
+        let pending_htlcs_len = 1 + pending_htlc_count * layout.htlc_script_len;
         // settlement_remote_pubkey_hash + settlement_remote_amount + settlement_local_pubkey_hash + settlement_local_amount
         let settlement_script_len = pending_htlcs_len + 72;
         if witness.len() < settlement_script_len {
@@ -297,11 +344,11 @@ fn auth() -> Result<(), Error> {
         let mut signatures_to_verify = Vec::new();
 
         for (i, htlc_script) in witness[1..pending_htlcs_len]
-            .chunks(HTLC_SCRIPT_LEN)
+            .chunks(layout.htlc_script_len)
             .enumerate()
         {
             if !settlements.is_empty() && settlements[0].unlock_type() == i as u8 {
-                let htlc = Htlc(htlc_script);
+                let htlc = Htlc::new(htlc_script, layout);
                 match htlc.htlc_type() {
                     HtlcType::Offered => {
                         if raw_since_value == 0 {
@@ -311,14 +358,11 @@ fn auth() -> Result<(), Error> {
                             }
                             // when input since is 0, it means the unlock logic is for remote_htlc pubkey and preimage
                             let preimage = settlements[0].preimage();
-                            if match htlc.payment_hash_type() {
-                                PaymentHashType::Blake2b => {
-                                    htlc.payment_hash() != &blake2b_256(preimage)[0..20]
-                                }
-                                PaymentHashType::Sha256 => {
-                                    htlc.payment_hash() != &Sha256::digest(preimage)[0..20]
-                                }
-                            } {
+                            if !preimage_matches(
+                                htlc.payment_hash_type(),
+                                htlc.payment_hash(),
+                                preimage,
+                            ) {
                                 return Err(Error::PreimageError);
                             }
                             new_amount = new_amount.saturating_sub(htlc.payment_amount());
@@ -353,14 +397,11 @@ fn auth() -> Result<(), Error> {
                             }
                             // when input since is 0, it means the unlock logic is for local_htlc pubkey and preimage
                             let preimage = settlements[0].preimage();
-                            if match htlc.payment_hash_type() {
-                                PaymentHashType::Blake2b => {
-                                    htlc.payment_hash() != &blake2b_256(preimage)[0..20]
-                                }
-                                PaymentHashType::Sha256 => {
-                                    htlc.payment_hash() != &Sha256::digest(preimage)[0..20]
-                                }
-                            } {
+                            if !preimage_matches(
+                                htlc.payment_hash_type(),
+                                htlc.payment_hash(),
+                                preimage,
+                            ) {
                                 return Err(Error::PreimageError);
                             }
                             new_amount = new_amount.saturating_sub(htlc.payment_amount());
@@ -463,13 +504,22 @@ fn auth() -> Result<(), Error> {
         // verify the first output cell's lock script and capacity are correct
         if new_amount > 0 && !two_parties_all_settled {
             let output_lock = load_cell_lock(0, Source::Output)?;
+            // propagate the layout version into the derived cell: v1 cells
+            // (58-byte args) keep their features byte at [57], legacy cells
+            // stay at 57 bytes; otherwise a v1 partial settlement would
+            // produce a 57-byte derived cell and brick the remaining v1
+            // pending HTLCs
+            let features_byte: &[u8] = if args.len() == 58 { &args[57..58] } else { &[] };
             let expected_lock_args = [
                 &args[0..36],
                 blake2b_256(new_settlement_script.concat())[0..20].as_ref(),
                 &[0x01], // 0x01 means new cell is created for subsequent commitment cell unlock
+                features_byte,
             ]
             .concat()
             .pack();
+            // keep the original combined check so legacy failure codes stay
+            // identical (OutputLockError)
             if output_lock.code_hash() != script.code_hash()
                 || output_lock.hash_type() != script.hash_type()
                 || output_lock.args() != expected_lock_args
