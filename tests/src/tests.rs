@@ -436,7 +436,7 @@ fn test_commitment_lock_no_pending_htlcs() {
         .build();
     let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
     let always_success_dep = CellDep::new_builder()
-        .out_point(always_success_out_point)
+        .out_point(always_success_out_point.clone())
         .build();
     let cell_deps = vec![commitment_lock_dep, auth_dep, always_success_dep].pack();
 
@@ -594,6 +594,43 @@ fn test_commitment_lock_no_pending_htlcs() {
         .verify_tx(&success_tx, MAX_CYCLES)
         .expect("pass verification");
     println!("consume cycles: {}", cycles);
+
+    // A CKB successor must not gain an unexpected type script.
+    let unexpected_type = context
+        .build_script(&always_success_out_point, Bytes::new())
+        .expect("type script");
+    let typed_output = outputs[0]
+        .clone()
+        .as_builder()
+        .type_(Some(unexpected_type).pack())
+        .build();
+    let typed_tx = tx
+        .as_advanced_builder()
+        .set_outputs(vec![typed_output])
+        .build();
+    let typed_signature = local_settlement_key
+        .0
+        .sign_recoverable(&compute_tx_message(&typed_tx).into())
+        .unwrap()
+        .serialize();
+    let typed_witness = [
+        EMPTY_WITNESS_ARGS.to_vec(),
+        vec![0x01],
+        settlement_script.clone(),
+        vec![0xFF, 0x00],
+        typed_signature,
+    ]
+    .concat();
+    let typed_tx = typed_tx
+        .as_advanced_builder()
+        .witness(typed_witness.pack())
+        .build();
+    assert_script_error_code(
+        &context,
+        &typed_tx,
+        20,
+        "CKB successor with unexpected type script",
+    );
 
     // test with settlement unlock logic (remote settlement key)
     let input_out_point = context.create_cell(outputs[0].clone(), Bytes::new());

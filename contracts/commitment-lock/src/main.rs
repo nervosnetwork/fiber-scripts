@@ -550,6 +550,11 @@ fn auth() -> Result<(), Error> {
                     }
                 }
                 None => {
+                    // A CKB successor must not acquire a type script.
+                    if load_cell_type(0, Source::Output)?.is_some() {
+                        return Err(Error::OutputTypeError);
+                    }
+
                     // verify the first output cell's capacity is correct
                     let output_capacity = load_cell_capacity(0, Source::Output)? as u128;
                     if output_capacity != new_amount {
