@@ -21,11 +21,11 @@ hash_type = "data1"
 # For unlocking inputs with multisig lock script
 [multisig_config]
 sighash_addresses = [
-  "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq2hvk2yvt998w799ra8t73gunvrjrlw4agv2t7np",
-  "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq2j24grqwjffj4ys2k2wtytfcvzhcf8tugut5v4n",
+  "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq0m2fr3ygwszxa77l5r7utgku85wyqvjac5wppfj",
   "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq2u7q5rqr3nam68g2wfel9365l855m7fcg58j52a",
   "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv8rhlzfvjl22jhg6j7046x9a6xph3vvwq2luq73",
-  "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqvsd9auv0wsq0a9mmp8f6hqax3fg8430mstg754t",
+  "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqw6mhpc5lcrhcaahjz7xkf09xr53y5j5hsw3cnlz",
+  "ckb1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqfk559azkd8u7wp7z7v49q8kw7t9f6qa8g5y5xep",
 ]
 require_first_n = 0
 threshold = 3
